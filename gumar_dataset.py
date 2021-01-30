@@ -56,7 +56,22 @@ class GumarDataset:
                 self._data.append(GumarDataset.Factor(f in [self.SOURCE, self.TARGET], train._data[f] if train else None))
             
             data_xml = ET.parse(data_file).getroot()
-            for sentence in data_xml.getchildren():
+            for sentence in data_xml:
+                sentence_temp_src = sentence[0].text
+                sentence_temp_src = GumarDataset.preprocess(sentence_temp_src)
+                sentence_temp_src = sentence_temp_src.split(' ')
+                sentence_temp_src = [token for token in sentence_temp_src if token]
+
+                sentence_temp_tgt = sentence[1].text
+                sentence_temp_tgt = GumarDataset.preprocess(sentence_temp_tgt)
+                sentence_temp_tgt = sentence_temp_tgt.split(' ')
+                sentence_temp_tgt = [token for token in sentence_temp_tgt if token]
+                
+                # Drop different-length and empty sentences
+                if len(sentence_temp_tgt) != len(sentence_temp_src) or \
+                        not (sentence_temp_src and sentence_temp_tgt):
+                    continue
+                
                 for f in range(self.FACTORS):
                     factor = self._data[f]
                     if len(factor.word_ids): factor.word_ids[-1] = np.array(factor.word_ids[-1], np.int32)
@@ -65,10 +80,7 @@ class GumarDataset:
                     if factor.characters:
                         factor.charseqs.append([])
                     
-                    sentence_temp = sentence[f%2].text
-                    sentence_temp = GumarDataset.preprocess(sentence_temp)
-                    sentence_temp = sentence_temp.split(' ')
-                    sentence_temp = [token for token in sentence_temp if token]
+                    sentence_temp = sentence_temp_tgt if f else sentence_temp_src
                     # Word-level information
                     for word in sentence_temp:
                         if word not in factor.words_map:
@@ -84,24 +96,22 @@ class GumarDataset:
                         if factor.characters:
                             factor.charseqs[-1].append([])
                             if add_bow_eow:
-                                factor.charseqs[-1][-1].append(
-                                    GumarDataset.Factor.BOW)
+                                factor.charseqs[-1][-1].append(GumarDataset.Factor.BOW)
                             for c in word:
                                 if c not in factor.alphabet_map:
                                     if train:
                                         c = "<unk>"
                                     else:
-                                        factor.alphabet_map[c] = len(
-                                            factor.alphabet)
+                                        factor.alphabet_map[c] = len(factor.alphabet)
                                         factor.alphabet.append(c)
-                                factor.charseqs[-1][-1].append(
-                                    factor.alphabet_map[c])
+                                factor.charseqs[-1][-1].append(factor.alphabet_map[c])
                             if add_bow_eow:
                                 factor.charseqs[-1][-1].append(
                                     GumarDataset.Factor.EOW)
 
                 if max_sentences is not None and len(self._data[self.SOURCE].word_ids) >= max_sentences:
                     break
+            
 
             self._size = len(self._data[self.SOURCE].word_ids)
             self._shuffler = np.random.RandomState(seed) if shuffle_batches else None
@@ -111,6 +121,7 @@ class GumarDataset:
         def data(self):
             return self._data
 
+        @property
         def size(self):
             return self._size
 
@@ -122,7 +133,9 @@ class GumarDataset:
                 permutation = permutation[batch_size:]
 
                 batch = []
-                max_sentence_len = max(len(self._data[self.SOURCE].word_ids[i]) for i in batch_perm)
+                max_sentence_len_src = max(len(self._data[self.SOURCE].word_ids[i]) for i in batch_perm)
+                max_sentence_len_tgt = max(len(self._data[self.TARGET].word_ids[i]) for i in batch_perm)
+                max_sentence_len = max(max_sentence_len_src, max_sentence_len_tgt)
 
                 # Word-level data
                 for factor in self._data:
@@ -132,8 +145,8 @@ class GumarDataset:
 
                 # Character-level data
                 for f, factor in enumerate(self._data):
-                    if not factor.characters: continue
-
+                    if not factor.characters:
+                        continue
                     max_charseq_len = max(len(charseq) for i in batch_perm for charseq in factor.charseqs[i])
 
                     batch[f].charseqs = np.zeros([batch_size, max_sentence_len, max_charseq_len], np.int32)
