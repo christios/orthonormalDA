@@ -248,7 +248,6 @@ class Network:
             # shape after `tf.gather_nd` == (# words (i.e., excluding words which are fully padded), length of longest word)
             source_charseqs = tf.gather_nd(source_charseqs, valid_words)
             target_charseqs = tf.gather_nd(target_charseqs, valid_words)
-            print(source_charseqs.shape, target_charseqs.shape)
 
             metrics = self.spelling_corrector.train_on_batch(x=[batch[dataset.SOURCE].charseqs, targets],
                                                             y=targets)
