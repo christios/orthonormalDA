@@ -6,6 +6,8 @@ import pyarabic.araby as araby
 import re
 from typing import Dict, List, Optional, TextIO
 
+ALEFAT = araby.ALEFAT[:5] + tuple(araby.ALEFAT[-1])
+ALEFAT_PATTERN = re.compile(u"[" + u"".join(ALEFAT) + u"]", re.UNICODE)
 
 class GumarDataset:
     """ * Loads a NMT dataset sentence per sentence.
@@ -207,11 +209,17 @@ class GumarDataset:
                 yield batch
 
     @staticmethod
-    def preprocess(sentence: str) -> str:
+    @staticmethod
+    def preprocess(sentence):
         sentence = araby.strip_tatweel(sentence)
-        sentence = araby.normalize_alef(sentence)
+        sentence = sentence.replace(
+            araby.SMALL_ALEF+araby.ALEF_MAKSURA, araby.ALEF_MAKSURA)
+        sentence = sentence.replace(
+            araby.ALEF_MAKSURA+araby.SMALL_ALEF, araby.ALEF_MAKSURA)
+        sentence = re.sub(ALEFAT_PATTERN, araby.ALEF, sentence)
         sentence = araby.normalize_ligature(sentence)
         sentence = araby.normalize_teh(sentence)
+        sentence = araby.strip_tashkeel(sentence)
         sentence = re.sub(r'[^\d\w]', r' ', sentence)
         sentence = re.sub(r'( ){2,}', r'\1', sentence)
         return sentence
