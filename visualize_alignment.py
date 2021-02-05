@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 
 import re
-import sys
 from collections import defaultdict
 from collections import Counter
-import itertools
-import pdb
 import itertools
 import os
 import argparse
@@ -216,7 +213,6 @@ def process_alignment_types(src2tgt, tgt2src, alignment_data):
 
 if __name__ == '__main__':
 	parser = argparse.ArgumentParser()
-	parser.add_argument("-t", "--test", help="Test mode", action="store_true")
 	parser.add_argument("source_filename", help="Source language file name")
 	parser.add_argument("target_filename", help="Target language file name")
 	parser.add_argument("alignment_filename", help="Alignments file")
@@ -224,15 +220,12 @@ if __name__ == '__main__':
 
 	SENTENCES = 1000
 
-	with open(source_filename) as source, \
-		 open(target_filename) as target, \
-		 open(alignment_filename) as alignment_f, \
+	with open(args.source_filename) as source, \
+		 open(args.target_filename) as target, \
+		 open(args.alignment_filename) as alignment_f, \
 		 open('alignments/vilems.txt', 'w') as vilems:
 
 		for f in zip(alignment_f, source, target):
-			# i = input('\nEnter -> To visualize new alignment\nexit -> to exit\nEnter value: ')
-			# if i == 'exit':
-			# 	break
 			info = tuple(map(lambda x: x.strip('\n'), f))
 
 			src_list = info[1].split()
@@ -252,8 +245,8 @@ if __name__ == '__main__':
 			alignment = ' '.join(align_list)
 			alignment = re.sub(r' ', r'%20', alignment)
 			
-			if len(tgt_list) != len(src_list):
-				print(f"https://vilda.net/s/slowalign/?text1={source_sentence}&text2={target_sentence}&algn={alignment}", file=vilems)
+			# if len(tgt_list) != len(src_list):
+			print(f"https://vilda.net/s/slowalign/?text1={source_sentence}&text2={target_sentence}&algn={alignment}", file=vilems)
 
 
 			# alignment_data = store_alignment(source_sentence, target_sentence, src2tgt)

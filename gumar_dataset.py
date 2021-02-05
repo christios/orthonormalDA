@@ -1,13 +1,21 @@
 import os
 import zipfile
+from tqdm import tqdm
 import xml.etree.ElementTree as ET
-import numpy as np
-import pyarabic.araby as araby
 import re
 from typing import Dict, List, Optional, TextIO
+from math import inf
+from collections import Counter
+import pickle
+
+import numpy as np
+import pyarabic.araby as araby
+from edit_distance import SequenceMatcher
+from nltk import edit_distance, masi_distance
 
 ALEFAT = araby.ALEFAT[:5] + tuple(araby.ALEFAT[-1])
 ALEFAT_PATTERN = re.compile(u"[" + u"".join(ALEFAT) + u"]", re.UNICODE)
+
 
 class GumarDataset:
     """ * Loads a NMT dataset sentence per sentence.
@@ -75,6 +83,13 @@ class GumarDataset:
         TARGET = 1
         FACTORS = 2
 
+        EXCLUSIONS = {'train': [1231, 2169, 2755, 4165, 5674, 9360, 10970,  # ede[ies]
+                                1447, 1717, 4828, 8889, 9049,  # eie[des]
+                                5147, 10606,  # missing token
+                                2031, 4852, 5280],  # misc
+                      'dev': [1109],
+                      'test': []}
+
         """Contains a factor for each column of data"""
         _data: List['GumarDataset.Factor']
         """Number of sentences in the dataset"""
@@ -88,8 +103,9 @@ class GumarDataset:
                      shuffle_batches: bool = True,
                      add_bow_eow: bool = False,
                      max_sentences: int = None,
-                     seed: int = 42) -> None:
-
+                     seed: int = 42,
+                     name: str = '') -> None:
+            self.docs = []
             # Create factors
             self._data = []
             for f in range(self.FACTORS):
@@ -97,7 +113,9 @@ class GumarDataset:
                     f in [self.SOURCE, self.TARGET], train._data[f] if train else None))
 
             data_xml = ET.parse(data_file).getroot()
-            for sentence in data_xml:
+            for idx, sentence in tqdm(enumerate(data_xml)):
+                if idx in GumarDataset.Dataset.EXCLUSIONS[name.lower()]:
+                    continue
                 sentence_temp_src = sentence[0].text
                 sentence_temp_src = GumarDataset.preprocess(sentence_temp_src)
                 sentence_temp_src = sentence_temp_src.split(' ')
@@ -111,9 +129,25 @@ class GumarDataset:
                     token for token in sentence_temp_tgt if token]
 
                 # Drop different-length and empty sentences
-                if len(sentence_temp_tgt) != len(sentence_temp_src) or \
-                        not (sentence_temp_src and sentence_temp_tgt):
+                if not (sentence_temp_src and sentence_temp_tgt):
                     continue
+                # Align src and tgt or discard example
+                try:
+                    sentence_temp_src = [[token, 'n'] for token in sentence_temp_src]
+                    sentence_temp_tgt = [[token, 'n'] for token in sentence_temp_tgt]
+                    src, tgt = GumarDataset.align(sentence_temp_src, sentence_temp_tgt)
+                except:
+                    GumarDataset.Dataset.EXCLUSIONS[name].append(idx)
+                    continue
+                
+                check_src = (' '.join([s[0] for s in sentence_temp_src]), ' '.join(src))
+                check_tgt = (' '.join([t[0] for t in sentence_temp_tgt]), ' '.join(tgt))
+                if check_src[0] != check_src[1] or check_tgt[0] != check_tgt[1]:
+                    continue
+                else:
+                    sentence_temp_src, sentence_temp_tgt = src, tgt
+
+                self.docs.append(idx)
 
                 for f in range(self.FACTORS):
                     factor = self._data[f]
@@ -208,7 +242,149 @@ class GumarDataset:
 
                 yield batch
 
+
     @staticmethod
+    def align_subsequences(src, tgt):
+        def include_alignment():
+            # If there are 'i' and 'd' tokens in addition to 's'
+            if [True for t in src[start:end] if t[1] != 's']:
+                s_temp, t_temp, alignment, flipped = GumarDataset.soft_align(
+                    tgt, src, start, end)
+                src_align = [a.split('-')[0] for a in alignment]
+                if src_align == sorted(src_align):
+                    align_dict = {}
+                    for a in alignment:
+                        a = a.split('-')
+                        align_dict.setdefault(int(a[0]), []).append(int(a[1]))
+                    align_dict = [(s_temp[s], ' '.join(
+                        map(lambda x: t_temp[x], t))) for s, t in align_dict.items()]
+                    for s, t in align_dict:
+                        if flipped:
+                            s, t = t, s
+                        src_temp.append(s)
+                        tgt_temp.append(t)
+            # Else they are already aligned
+            else:
+                for j in range(start, end):
+                    src_temp.append(src[j][0])
+                    tgt_temp.append(tgt[j][0])
+
+        start, end = -1, -1
+        src_temp, tgt_temp = [], []
+        for i, token in enumerate(src):
+            op = token[1]
+            if start == -1 and op == 'e':
+                src_temp.append(src[i][0])
+                tgt_temp.append(tgt[i][0])
+            elif start == -1 and op != 'e':
+                start = i
+            # RHS of OR is for when the
+            elif start != -1 and op == 'e':
+                end = i
+                include_alignment()
+                # Add first token with value 'e'
+                src_temp.append(src[i][0])
+                tgt_temp.append(tgt[i][0])
+                start, end = -1, -1
+        else:
+            end = i + 1
+            # If last operation is not e and we are in the
+            # middle of a (possibly) badly aligned subsequence
+            if start != -1:
+                include_alignment()
+
+        return src_temp, tgt_temp
+
+    @staticmethod
+    def align(src, tgt):
+        """Corrects misalignments between the gold and predicted tokens
+        which will almost almost always have different lengths due to inserted, 
+        deleted, or substituted tookens in the predicted systme output."""
+
+        sm = SequenceMatcher(
+            a=list(map(lambda x: x[0], tgt)), b=list(map(lambda x: x[0], src)))
+        tgt_temp, src_temp = [], []
+        opcodes = sm.get_opcodes()
+        for tag, i1, i2, j1, j2 in opcodes:
+            # If they are equal, do nothing except lowercase them
+            if tag == 'equal':
+                for i in range(i1, i2):
+                    tgt[i][1] = 'e'
+                    tgt_temp.append(tgt[i])
+                for i in range(j1, j2):
+                    src[i][1] = 'e'
+                    src_temp.append(src[i])
+            # For insertions and deletions, put a filler of '***' on the other one, and
+            # make the other all caps
+            elif tag == 'delete':
+                for i in range(i1, i2):
+                    tgt[i][1] = 'd'
+                    tgt_temp.append(tgt[i])
+                for i in range(i1, i2):
+                    src_temp.append(tgt[i])
+            elif tag == 'insert':
+                for i in range(j1, j2):
+                    src[i][1] = 'i'
+                    tgt_temp.append(src[i])
+                for i in range(j1, j2):
+                    src_temp.append(src[i])
+            # More complicated logic for a substitution
+            elif tag == 'replace':
+                for i in range(i1, i2):
+                    tgt[i][1] = 's'
+                for i in range(j1, j2):
+                    src[i][1] = 's'
+                tgt_temp += tgt[i1:i2]
+                src_temp += src[j1:j2]
+
+        src, tgt = GumarDataset.align_subsequences(src_temp, tgt_temp)
+        return src, tgt
+
+
+    @staticmethod
+    def soft_align(tgt, src, start, end):
+        src = [token[0] for token in src[start:end] if token[1] != 'd']
+        tgt = [token[0] for token in tgt[start:end] if token[1] != 'i']
+        
+        flipped = False
+        if len(tgt) < len(src):
+            src, tgt = tgt, src
+            flipped = True
+        
+        I, J = len(tgt), len(src)
+        alignment = []
+        start = 0
+        for i in range(I):
+            best_score = inf
+            best_j = 0
+
+            src_assigned = list(Counter([a[0] for a in alignment]).items())
+            last_src_assigned_counts_2 = src_assigned[-1][1] == 2 if src_assigned else False
+            last_two_src_different = True if len(
+                src_assigned) > 1 and src_assigned[-1][1] == 1 else False
+            if len(tgt) - len(src) < 5 and last_src_assigned_counts_2:
+                start = len(src_assigned) if start < J else J - 1
+            elif len(tgt) - len(src) < 5 and last_two_src_different:
+                start = len(src_assigned) - 1
+
+            for j in range(start, J):
+                context = [tgt[i][0]]
+                if 1 <= i < I - 1 and I > 2:
+                    context = [tgt[i-1][0] + tgt[i]
+                               [0], tgt[i][0] + tgt[i+1][0]]
+                for c in context:
+                    # Add 1 penalty if source token was already assigned 2 times
+                    #TODO: change to masi_distance or add a bigram lookahead feature
+                    score = edit_distance(
+                        src[j][0], tgt[i][0]) * ((masi_distance(set(c), set(src[j][0])) if 1 <= i < I else 0))
+                    if score < best_score:
+                        best_score = score
+                        best_j = j
+            alignment.append(f"{best_j}-{i}")
+
+        return src, tgt, alignment, flipped
+
+
     @staticmethod
     def preprocess(sentence):
         sentence = araby.strip_tatweel(sentence)
@@ -237,8 +413,34 @@ class GumarDataset:
                                                                 train=self.train if dataset != "TRAIN" else None,
                                                                 shuffle_batches=dataset == "TRAIN",
                                                                 add_bow_eow=add_bow_eow,
-                                                                max_sentences=max_sentences))
+                                                                max_sentences=max_sentences,
+                                                                name=dataset.lower()))
 
 
 if __name__ == "__main__":
+    # if os.path.exists('alignments/useful_examples'):
+    #     with open('alignments/useful_examples', 'rb') as u:
+    #         useful_examples = pickle.load(u)
+    # else:
+    #     gumar = GumarDataset('annotated-gumar-corpus')
+    #     useful_examples = []
+    #     total_examples = 0
+    #     for idx in range(gumar.train.size):
+    #         src = gumar.train.data[0].word_strings[idx]
+    #         tgt = gumar.train.data[1].word_strings[idx]
+    #         total_examples += len(src)
+    #         for i in range(len(src)):
+    #             if src[i] != tgt[i]:
+    #                 useful_examples.append((src[i], tgt[i]))
+    #     with open('alignments/useful_examples', 'wb') as u:
+    #         pickle.dump(useful_examples, u)
+
+    # dubious = {}
+    # for i in range(5):
+    #     for ex in useful_examples:
+    #         if edit_distance(ex[0], ex[1]) == i:
+    #             dubious.setdefault(i, []).append(ex)
+    
     gumar = GumarDataset('annotated-gumar-corpus')
+    with open('data/gumar', 'wb') as g:
+        pickle.dump(gumar, g)
