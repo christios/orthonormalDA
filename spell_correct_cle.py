@@ -171,45 +171,45 @@ class Network:
             # If `inputs` is a list of two elements, we are in the teacher forcing mode.
             # Otherwise, we run in autoregressive mode.
             if isinstance(inputs, list) and len(inputs) == 2:
-                source_charseqs, target_charseqs = inputs
+                source_sentences_chars, target_sentences_chars = inputs
             else:
-                source_charseqs, target_charseqs = inputs, None
-            source_charseqs_shape = tf.shape(source_charseqs)
+                source_sentences_chars, target_sentences_chars = inputs, None
+            source_sentences_chars_shape = tf.shape(source_sentences_chars)
             
             # Encoder:
-            # Get indices of valid words and reshape the `source_charseqs`
+            # Get indices of valid words and reshape the `source_sentences_chars`
             # so that it is a list of valid sequences, instead of a
             # matrix of sequences, some of them padding ones.
             valid_words = tf.cast(
-                tf.where(source_charseqs[:, :, 0] != 0), tf.int32)
+                tf.where(source_sentences_chars[:, :, 0] != 0), tf.int32)
             # shape after `tf.gather_nd` == (# words (i.e., excluding words which are fully padded), length of longest word)
-            source_charseqs = tf.gather_nd(source_charseqs, valid_words)
-            if target_charseqs is not None:
-                target_charseqs = tf.gather_nd(target_charseqs, valid_words)
+            source_sentences_chars = tf.gather_nd(source_sentences_chars, valid_words)
+            if target_sentences_chars is not None:
+                target_sentences_chars = tf.gather_nd(target_sentences_chars, valid_words)
 
-            source_embedding = self.source_embedding(source_charseqs)
+            source_embedding = self.source_embedding(source_sentences_chars)
             source_states = self.source_rnn(source_embedding)
 
             # Run the appropriate decoder
-            if target_charseqs is not None:
+            if target_sentences_chars is not None:
                 decoderTraining = self.DecoderTraining(self)
                 output_layer, _, output_lens = decoderTraining(
-                    [source_states, target_charseqs])
+                    [source_states, target_sentences_chars])
             else:
-                # tf.shape(source_charseqs)[1] + 10 indicates that the longest prediction
+                # tf.shape(source_sentences_chars)[1] + 10 indicates that the longest prediction
                 # must be at most 10 characters longer than the longest input.
                 # Then run it on `source_states`, storing the first result
                 # in `output_layer` and the third result in `output_lens`.
                 decoderPrediction = self.DecoderPrediction(
-                    self, maximum_iterations=tf.shape(source_charseqs)[1] + 10)
+                    self, maximum_iterations=tf.shape(source_sentences_chars)[1] + 10)
                 output_layer, _, output_lens = decoderPrediction(source_states)
 
             # Reshape the output to the original matrix of words
             # and explicitly set mask for loss and metric computation.
             output_layer = tf.scatter_nd(valid_words, output_layer, tf.concat(
-                [source_charseqs_shape[:2], tf.shape(output_layer)[1:]], axis=0))
+                [source_sentences_chars_shape[:2], tf.shape(output_layer)[1:]], axis=0))
             output_layer._keras_mask = tf.sequence_mask(tf.scatter_nd(
-                valid_words, output_lens, source_charseqs_shape[:2]))
+                valid_words, output_lens, source_sentences_chars_shape[:2]))
             return output_layer
 
     def __init__(self, args, src_chars_vocab_len, tgt_chars_vocab_len):
@@ -240,16 +240,15 @@ class Network:
     def train_epoch(self, dataset, args):
         for batch in dataset.batches(args.batch_size):
             # Create `targets` by appending EOW after target words
-            targets = self.append_eow(batch[dataset.TARGET].charseqs)
+            targets = self.append_eow(batch[dataset.TARGET].sentences_chars_ids)
             
-            source_charseqs, target_charseqs = batch[dataset.SOURCE].charseqs, targets
-            valid_words = tf.cast(
-                tf.where(source_charseqs[:, :, 0] != 0), tf.int32)
-            # shape after `tf.gather_nd` == (# words (i.e., excluding words which are fully padded), length of longest word)
-            source_charseqs = tf.gather_nd(source_charseqs, valid_words)
-            target_charseqs = tf.gather_nd(target_charseqs, valid_words)
+            # source_sentences_chars, target_sentences_chars = batch[dataset.SOURCE].sentences_chars_ids, targets
+            # valid_words = tf.cast(
+            #     tf.where(source_sentences_chars[:, :, 0] != 0), tf.int32)
+            # source_sentences_chars = tf.gather_nd(source_sentences_chars, valid_words)
+            # target_sentences_chars = tf.gather_nd(target_sentences_chars, valid_words)
 
-            metrics = self.spelling_corrector.train_on_batch(x=[batch[dataset.SOURCE].charseqs, targets],
+            metrics = self.spelling_corrector.train_on_batch(x=[batch[dataset.SOURCE].sentences_chars_ids, targets],
                                                             y=targets)
             # Generate the summaries each 10 steps
             iteration = int(self.spelling_corrector.optimizer.iterations)
@@ -258,13 +257,13 @@ class Network:
                 metrics = dict(zip(self.spelling_corrector.metrics_names, metrics))
 
                 predictions = self.predict_batch(
-                    batch[dataset.SOURCE].charseqs[:1]).numpy()
+                    batch[dataset.SOURCE].sentences_chars_ids[:1]).numpy()
                 
-                raw = "".join(dataset.data[dataset.SOURCE].alphabet[i]
-                               for i in batch[dataset.SOURCE].charseqs[0, 0] if i)
+                raw = "".join(dataset.data[dataset.SOURCE].chars_map[i]
+                               for i in batch[dataset.SOURCE].sentences_chars_ids[0, 0] if i)
                 gold_coda = "".join(
-                    dataset.data[dataset.TARGET].alphabet[i] for i in targets[0, 0] if i)
-                system_coda = "".join(dataset.data[dataset.TARGET].alphabet[i]
+                    dataset.data[dataset.TARGET].chars_map[i] for i in targets[0, 0] if i)
+                system_coda = "".join(dataset.data[dataset.TARGET].chars_map[i]
                                        for i in predictions[0, 0] if i != GumarDataset.Factor.EOW)
                 status = ", ".join([*["{}={:.4f}".format(name, value) for name, value in metrics.items()],
                                     "{} {} {}".format(raw, gold_coda, system_coda)])
@@ -277,17 +276,17 @@ class Network:
 
 
     @tf.function(experimental_relax_shapes=True)
-    def predict_batch(self, charseqs):
-        return self.spelling_corrector(charseqs)
+    def predict_batch(self, sentences_chars):
+        return self.spelling_corrector(sentences_chars)
 
     def evaluate(self, dataset, dataset_name, args):
         correct_coda_forms, total_coda_forms = 0, 0
         for batch in dataset.batches(args.batch_size):
             predictions = self.predict_batch(
-                batch[dataset.SOURCE].charseqs).numpy()
+                batch[dataset.SOURCE].sentences_chars_ids).numpy()
 
             # Compute whole coda accuracy
-            targets = self.append_eow(batch[dataset.TARGET].charseqs)
+            targets = self.append_eow(batch[dataset.TARGET].sentences_chars_ids)
             resized_predictions = np.concatenate(
                 [predictions, np.zeros_like(targets)], axis=2)[:, :, :targets.shape[2]]
             valid_coda_forms = targets[:, :, 0] != GumarDataset.Factor.EOW
@@ -316,7 +315,7 @@ class Network:
         predictions = []
         for batch in dataset.batches(args.batch_size):
             prediction_batch = self.predict_batch(
-                batch[dataset.SOURCE].charseqs).numpy().tolist()
+                batch[dataset.SOURCE].sentences_chars_ids).numpy().tolist()
             for sentence in prediction_batch:
                 predictions.append(sentence)
         return predictions
@@ -366,8 +365,8 @@ if __name__ == "__main__":
     # Create the network and train
     network = Network(args,
                       src_chars_vocab_len=len(
-                          gumar.train.data[gumar.train.SOURCE].alphabet),
-                      tgt_chars_vocab_len=len(gumar.train.data[gumar.train.TARGET].alphabet))
+                          gumar.train.data[gumar.train.SOURCE].chars_map),
+                      tgt_chars_vocab_len=len(gumar.train.data[gumar.train.TARGET].chars_map))
     
     for epoch in range(args.epochs):
         network.train_epoch(gumar.train, args)

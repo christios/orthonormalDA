@@ -37,46 +37,46 @@ class GumarDataset:
         EOW = 3
 
         """String -> word_id map"""
-        words_map: Dict[str, int]
+        words_vocab: Dict[str, int]
         """Word_id -> string list"""
-        words: List[str]
+        words_map: List[str]
         """Word ids of the original words (uses <unk> and <pad>)"""
-        word_ids: List[np.ndarray]
+        sentences_words_ids: List[np.ndarray]
         """Strings of the original words"""
-        word_strings: List[np.ndarray]
+        sentences_words: List[List[str]]
         """Character -> char_id map"""
-        alphabet_map: Dict[str, int]
+        chars_vocab: Dict[str, int]
         """Char_id -> character list"""
-        alphabet: List[str]
+        chars_map: List[str]
         """Sequences of characters of the original words"""
-        charseqs: List[np.ndarray]
+        sentences_chars_ids: List[np.ndarray]
 
         def __init__(self,
                      characters: bool,
                      train: Optional['GumarDataset.Factor'] = None) -> None:
 
-            self.words_map = train.words_map if train else {
+            self.words_vocab = train.words_vocab if train else {
                 "<pad>": self.PAD, "<unk>": self.UNK}
-            self.words = train.words if train else ["<pad>", "<unk>"]
-            self.word_ids = []
-            self.word_strings = []
+            self.words_map = train.words_map if train else ["<pad>", "<unk>"]
+            self.sentences_words_ids = []
+            self.sentences_words = []
             self.characters = characters
             # For example, if the factor represents POS, then it makes no sense to keep
             # a characer level representation of them, then this should be `False`.
             if characters:
-                self.alphabet_map = train.alphabet_map if train else {
+                self.chars_vocab = train.chars_vocab if train else {
                     "<pad>": self.PAD, "<unk>": self.UNK, "<bow>": self.BOW, "<eow>": self.EOW}
-                self.alphabet = train.alphabet if train else [
+                self.chars_map = train.chars_map if train else [
                     "<pad>", "<unk>", "<bow>", "<eow>"]
-                self.charseqs = []
+                self.sentences_chars_ids = []
 
     class FactorBatch:
         def __init__(self,
-                     word_ids: List[np.ndarray],
-                     charseqs: List[np.ndarray] = None) -> None:
+                     sentences_words_ids: List[np.ndarray],
+                     sentences_chars_ids: List[np.ndarray] = None) -> None:
 
-            self.word_ids = word_ids
-            self.charseqs = charseqs
+            self.sentences_words_ids = sentences_words_ids
+            self.sentences_chars_ids = sentences_chars_ids
 
     class Dataset:
         SOURCE = 0
@@ -116,85 +116,81 @@ class GumarDataset:
             for idx, sentence in tqdm(enumerate(data_xml)):
                 if idx in GumarDataset.Dataset.EXCLUSIONS[name.lower()]:
                     continue
-                sentence_temp_src = sentence[0].text
-                sentence_temp_src = GumarDataset.preprocess(sentence_temp_src)
-                sentence_temp_src = sentence_temp_src.split(' ')
-                sentence_temp_src = [
-                    token for token in sentence_temp_src if token]
+                src_temp = sentence[0].text
+                src_temp = GumarDataset.preprocess(src_temp)
+                src_temp = src_temp.split(' ')
+                src_temp = [token for token in src_temp if token]
 
-                sentence_temp_tgt = sentence[1].text
-                sentence_temp_tgt = GumarDataset.preprocess(sentence_temp_tgt)
-                sentence_temp_tgt = sentence_temp_tgt.split(' ')
-                sentence_temp_tgt = [
-                    token for token in sentence_temp_tgt if token]
+                tgt_temp = sentence[1].text
+                tgt_temp = GumarDataset.preprocess(tgt_temp)
+                tgt_temp = tgt_temp.split(' ')
+                tgt_temp = [token for token in tgt_temp if token]
 
                 # Drop different-length and empty sentences
-                if not (sentence_temp_src and sentence_temp_tgt):
+                if not (src_temp and tgt_temp):
                     continue
                 # Align src and tgt or discard example
                 try:
-                    sentence_temp_src = [[token, 'n'] for token in sentence_temp_src]
-                    sentence_temp_tgt = [[token, 'n'] for token in sentence_temp_tgt]
-                    src, tgt = GumarDataset.align(sentence_temp_src, sentence_temp_tgt)
+                    src_temp = [[token, 'n'] for token in src_temp]
+                    tgt_temp = [[token, 'n'] for token in tgt_temp]
+                    src, tgt = GumarDataset.align(src_temp, tgt_temp)
                 except:
                     GumarDataset.Dataset.EXCLUSIONS[name].append(idx)
                     continue
                 
-                check_src = (' '.join([s[0] for s in sentence_temp_src]), ' '.join(src))
-                check_tgt = (' '.join([t[0] for t in sentence_temp_tgt]), ' '.join(tgt))
+                check_src = (' '.join([s[0] for s in src_temp]), ' '.join(src))
+                check_tgt = (' '.join([t[0] for t in tgt_temp]), ' '.join(tgt))
                 if check_src[0] != check_src[1] or check_tgt[0] != check_tgt[1]:
                     continue
-                else:
-                    sentence_temp_src, sentence_temp_tgt = src, tgt
 
                 self.docs.append(idx)
 
                 for f in range(self.FACTORS):
                     factor = self._data[f]
-                    if len(factor.word_ids):
-                        factor.word_ids[-1] = np.array(
-                            factor.word_ids[-1], np.int32)
-                    factor.word_ids.append([])
-                    factor.word_strings.append([])
+                    if len(factor.sentences_words_ids):
+                        factor.sentences_words_ids[-1] = np.array(
+                            factor.sentences_words_ids[-1], np.int32)
+                    factor.sentences_words_ids.append([])
+                    factor.sentences_words.append([])
                     if factor.characters:
-                        factor.charseqs.append([])
+                        factor.sentences_chars_ids.append([])
 
-                    sentence_temp = sentence_temp_tgt if f else sentence_temp_src
+                    sentence = tgt if f else src
                     # Word-level information
-                    for word in sentence_temp:
-                        if word not in factor.words_map:
+                    for word in sentence:
+                        if word not in factor.words_vocab:
                             if train:
                                 word = "<unk>"
                             else:
-                                factor.words_map[word] = len(factor.words)
-                                factor.words.append(word)
-                        factor.word_ids[-1].append(factor.words_map[word])
-                        factor.word_strings[-1].append(word)
+                                factor.words_vocab[word] = len(factor.words_map)
+                                factor.words_map.append(word)
+                        factor.sentences_words_ids[-1].append(factor.words_vocab[word])
+                        factor.sentences_words[-1].append(word)
 
                         # Character-level information
                         if factor.characters:
-                            factor.charseqs[-1].append([])
+                            factor.sentences_chars_ids[-1].append([])
                             if add_bow_eow:
-                                factor.charseqs[-1][-1].append(
+                                factor.sentences_chars_ids[-1][-1].append(
                                     GumarDataset.Factor.BOW)
                             for c in word:
-                                if c not in factor.alphabet_map:
+                                if c not in factor.chars_vocab:
                                     if train:
                                         c = "<unk>"
                                     else:
-                                        factor.alphabet_map[c] = len(
-                                            factor.alphabet)
-                                        factor.alphabet.append(c)
-                                factor.charseqs[-1][-1].append(
-                                    factor.alphabet_map[c])
+                                        factor.chars_vocab[c] = len(
+                                            factor.chars_map)
+                                        factor.chars_map.append(c)
+                                factor.sentences_chars_ids[-1][-1].append(
+                                    factor.chars_vocab[c])
                             if add_bow_eow:
-                                factor.charseqs[-1][-1].append(
+                                factor.sentences_chars_ids[-1][-1].append(
                                     GumarDataset.Factor.EOW)
 
-                if max_sentences is not None and len(self._data[self.SOURCE].word_ids) >= max_sentences:
+                if max_sentences is not None and len(self._data[self.SOURCE].sentences_words_ids) >= max_sentences:
                     break
 
-            self._size = len(self._data[self.SOURCE].word_ids)
+            self._size = len(self._data[self.SOURCE].sentences_words_ids)
             self._shuffler = np.random.RandomState(
                 seed) if shuffle_batches else None
 
@@ -217,47 +213,47 @@ class GumarDataset:
                 batch = []
                 # Current implementation has same length for source and target
                 max_sentence_len = max(
-                    len(self._data[self.SOURCE].word_ids[i]) for i in batch_perm)
+                    len(self._data[self.SOURCE].sentences_words_ids[i]) for i in batch_perm)
 
                 # Word-level data
                 for factor in self._data:
                     batch.append(GumarDataset.FactorBatch(
                         np.zeros([batch_size, max_sentence_len], np.int32)))
                     for i in range(batch_size):
-                        batch[-1].word_ids[i, :len(factor.word_ids[batch_perm[i]])
-                                           ] = factor.word_ids[batch_perm[i]]
+                        batch[-1].sentences_words_ids[i, :len(factor.sentences_words_ids[batch_perm[i]])
+                                           ] = factor.sentences_words_ids[batch_perm[i]]
 
                 # Character-level data
                 for f, factor in enumerate(self._data):
                     if not factor.characters:
                         continue
-                    max_charseq_len = max(
-                        len(charseq) for i in batch_perm for charseq in factor.charseqs[i])
+                    max_word_len = max(
+                        len(word_chars) for i in batch_perm for word_chars in factor.sentences_chars_ids[i])
 
-                    batch[f].charseqs = np.zeros(
-                        [batch_size, max_sentence_len, max_charseq_len], np.int32)
+                    batch[f].sentences_chars_ids = np.zeros(
+                        [batch_size, max_sentence_len, max_word_len], np.int32)
                     for i in range(batch_size):
-                        for j, charseq in enumerate(factor.charseqs[batch_perm[i]]):
-                            batch[f].charseqs[i, j, :len(charseq)] = charseq
+                        for j, sentence_chars in enumerate(factor.sentences_chars_ids[batch_perm[i]]):
+                            batch[f].sentences_chars_ids[i, j, :len(sentence_chars)] = sentence_chars
 
                 yield batch
 
 
     @staticmethod
-    def align_subsequences(src, tgt):
+    def align_subsequences(src_sub, tgt_sub):
         def include_alignment():
             # If there are 'i' and 'd' tokens in addition to 's'
-            if [True for t in src[start:end] if t[1] != 's']:
-                s_temp, t_temp, alignment, flipped = GumarDataset.soft_align(
-                    tgt, src, start, end)
+            if [True for t in src_sub[start:end] if t[1] != 's']:
+                src_sub_temp, tgt_sub_temp, alignment, flipped = GumarDataset.soft_align(
+                    tgt_sub, src_sub, start, end)
                 src_align = [a.split('-')[0] for a in alignment]
                 if src_align == sorted(src_align):
                     align_dict = {}
                     for a in alignment:
                         a = a.split('-')
                         align_dict.setdefault(int(a[0]), []).append(int(a[1]))
-                    align_dict = [(s_temp[s], ' '.join(
-                        map(lambda x: t_temp[x], t))) for s, t in align_dict.items()]
+                    align_dict = [(src_sub_temp[s], ' '.join(
+                        map(lambda x: tgt_sub_temp[x], t))) for s, t in align_dict.items()]
                     for s, t in align_dict:
                         if flipped:
                             s, t = t, s
@@ -266,16 +262,16 @@ class GumarDataset:
             # Else they are already aligned
             else:
                 for j in range(start, end):
-                    src_temp.append(src[j][0])
-                    tgt_temp.append(tgt[j][0])
+                    src_temp.append(src_sub[j][0])
+                    tgt_temp.append(tgt_sub[j][0])
 
         start, end = -1, -1
         src_temp, tgt_temp = [], []
-        for i, token in enumerate(src):
+        for i, token in enumerate(src_sub):
             op = token[1]
             if start == -1 and op == 'e':
-                src_temp.append(src[i][0])
-                tgt_temp.append(tgt[i][0])
+                src_temp.append(src_sub[i][0])
+                tgt_temp.append(tgt_sub[i][0])
             elif start == -1 and op != 'e':
                 start = i
             # RHS of OR is for when the
@@ -283,8 +279,8 @@ class GumarDataset:
                 end = i
                 include_alignment()
                 # Add first token with value 'e'
-                src_temp.append(src[i][0])
-                tgt_temp.append(tgt[i][0])
+                src_temp.append(src_sub[i][0])
+                tgt_temp.append(tgt_sub[i][0])
                 start, end = -1, -1
         else:
             end = i + 1
