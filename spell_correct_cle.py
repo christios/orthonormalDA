@@ -5,6 +5,7 @@ import numpy as np
 import os
 import datetime
 import argparse
+import pickle
 
 from gumar_dataset import GumarDataset
 
@@ -179,7 +180,9 @@ class Network:
             # Encoder:
             # Get indices of valid words and reshape the `source_sentences_chars`
             # so that it is a list of valid sequences, instead of a
-            # matrix of sequences, some of them padding ones.
+            # matrix of sequences, some of them padding ones. The encoder
+            # just takes in words (not sentences), this is why we need to remove
+            # paddings that acted as words to build the batch.
             valid_words = tf.cast(
                 tf.where(source_sentences_chars[:, :, 0] != 0), tf.int32)
             # shape after `tf.gather_nd` == (# words (i.e., excluding words which are fully padded), length of longest word)
@@ -241,15 +244,9 @@ class Network:
         for batch in dataset.batches(args.batch_size):
             # Create `targets` by appending EOW after target words
             targets = self.append_eow(batch[dataset.TARGET].sentences_chars_ids)
-            
-            # source_sentences_chars, target_sentences_chars = batch[dataset.SOURCE].sentences_chars_ids, targets
-            # valid_words = tf.cast(
-            #     tf.where(source_sentences_chars[:, :, 0] != 0), tf.int32)
-            # source_sentences_chars = tf.gather_nd(source_sentences_chars, valid_words)
-            # target_sentences_chars = tf.gather_nd(target_sentences_chars, valid_words)
-
-            metrics = self.spelling_corrector.train_on_batch(x=[batch[dataset.SOURCE].sentences_chars_ids, targets],
-                                                            y=targets)
+            sources = batch[dataset.SOURCE].sentences_chars_ids
+            metrics = self.spelling_corrector.train_on_batch(x=[sources, targets],
+                                                             y=targets)
             # Generate the summaries each 10 steps
             iteration = int(self.spelling_corrector.optimizer.iterations)
             if iteration % 10 == 0:
@@ -258,7 +255,7 @@ class Network:
 
                 predictions = self.predict_batch(
                     batch[dataset.SOURCE].sentences_chars_ids[:1]).numpy()
-                
+
                 raw = "".join(dataset.data[dataset.SOURCE].chars_map[i]
                                for i in batch[dataset.SOURCE].sentences_chars_ids[0, 0] if i)
                 gold_coda = "".join(
@@ -334,6 +331,8 @@ if __name__ == "__main__":
                         type=int, help="Maximum number of sentences to load.")
     parser.add_argument("--rnn_dim", default=64, type=int,
                         help="RNN cell dimension.")
+    parser.add_argument("--cell", default='gru', type=str,
+                        help="RNN cell type.")
     parser.add_argument("--seed", default=42, type=int, help="Random seed.")
     parser.add_argument("--threads", default=1, type=int,
                         help="Maximum number of threads to use.")
@@ -359,8 +358,13 @@ if __name__ == "__main__":
             "(.)[^_]*_?", r"\1", key), value) for key, value in sorted(vars(args).items())))
     ))
 
-    # Load the data
-    gumar = GumarDataset('annotated-gumar-corpus')
+    if os.path.exists('data/gumar'):
+        with open('data/gumar', 'rb') as g:
+            gumar = pickle.load(g)
+    else:
+        gumar = GumarDataset('annotated-gumar-corpus')
+        with open('data/gumar', 'wb') as g:
+            pickle.dump(gumar, g)
 
     # Create the network and train
     network = Network(args,
