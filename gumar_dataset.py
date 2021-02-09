@@ -19,11 +19,11 @@ ALEFAT_PATTERN = re.compile(u"[" + u"".join(ALEFAT) + u"]", re.UNICODE)
 
 class GumarDataset:
     """ * Loads a NMT dataset sentence per sentence.
-        * The data consists of three Datasets
+        * The data consists of three `Dataset`s
             - TRAIN
             - DEV
             - TEST
-        *  Each dataset is composed of factors (SOURCE, TARGET)
+        *  Each `Dataset` is composed of factors (SOURCE, TARGET)
     """
 
     train: 'GumarDataset.Dataset'
@@ -33,8 +33,8 @@ class GumarDataset:
     class Factor:
         PAD = 0
         UNK = 1
-        BOW = 2
-        EOW = 3
+        BOW, BOS = 2, 2
+        EOW, EOS = 3, 3
 
         """String -> word_id map"""
         words_vocab: Dict[str, int]
@@ -56,8 +56,8 @@ class GumarDataset:
                      train: Optional['GumarDataset.Factor'] = None) -> None:
 
             self.words_vocab = train.words_vocab if train else {
-                "<pad>": self.PAD, "<unk>": self.UNK}
-            self.words_map = train.words_map if train else ["<pad>", "<unk>"]
+                "<pad>": self.PAD, "<unk>": self.UNK, "<bos>": self.BOS, "<eos>": self.EOS}
+            self.words_map = train.words_map if train else ["<pad>", "<unk>", "<bos>", "<eos>"]
             self.sentences_words_ids = []
             self.sentences_words = []
             self.characters = characters
@@ -105,7 +105,7 @@ class GumarDataset:
                      max_sentences: int = None,
                      seed: int = 42,
                      name: str = '') -> None:
-            self.docs = []
+
             # Create factors
             self._data = []
             for f in range(self.FACTORS):
@@ -143,15 +143,17 @@ class GumarDataset:
                 if check_src[0] != check_src[1] or check_tgt[0] != check_tgt[1]:
                     continue
 
-                self.docs.append(idx)
-
                 for f in range(self.FACTORS):
                     factor = self._data[f]
                     if len(factor.sentences_words_ids):
                         factor.sentences_words_ids[-1] = np.array(
                             factor.sentences_words_ids[-1], np.int32)
                     factor.sentences_words_ids.append([])
+                    factor.sentences_words_ids[-1].append(
+                        GumarDataset.Factor.BOS)
                     factor.sentences_words.append([])
+                    factor.sentences_words[-1].append(
+                        factor.words_map[GumarDataset.Factor.BOS])
                     if factor.characters:
                         factor.sentences_chars_ids.append([])
 
@@ -186,7 +188,8 @@ class GumarDataset:
                             if add_bow_eow:
                                 factor.sentences_chars_ids[-1][-1].append(
                                     GumarDataset.Factor.EOW)
-
+                    factor.sentences_words_ids[-1].append(GumarDataset.Factor.EOS)
+                    factor.sentences_words[-1].append(factor.words_map[GumarDataset.Factor.EOS])
                 if max_sentences is not None and len(self._data[self.SOURCE].sentences_words_ids) >= max_sentences:
                     break
 
@@ -437,6 +440,11 @@ if __name__ == "__main__":
     #         if edit_distance(ex[0], ex[1]) == i:
     #             dubious.setdefault(i, []).append(ex)
     
-    gumar = GumarDataset('annotated-gumar-corpus')
-    with open('data/gumar', 'wb') as g:
-        pickle.dump(gumar, g)
+    # gumar = GumarDataset('annotated-gumar-corpus')
+    # with open('data/gumar', 'wb') as g:
+    #     pickle.dump(gumar, g)
+    with open('data/gumar', 'rb') as g:
+        gumar = pickle.load(g)
+        tokens = [token for sent in gumar.train.data[1].sentences_words for token in sent]
+        tokens_fl = Counter(tokens).most_common()
+        pass
