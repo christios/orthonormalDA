@@ -400,10 +400,10 @@ for epoch in range(EPOCHS):
     batch_loss = train_step(inp, targ, enc_hidden)
     total_loss += batch_loss
     progbar.update(batch+1)
-    # if batch % 100 == 0:
-    #   print('Epoch {} Batch {} Loss {:.4f}'.format(epoch + 1,
-    #                                                batch,
-    #                                                batch_loss.numpy()))
+    if batch % 10 == 0:
+      print('Epoch {} Batch {} Loss {:.4f}'.format(epoch + 1,
+                                                   batch,
+                                                   batch_loss.numpy()))
   # saving (checkpoint) the model every 2 epochs
   if (epoch + 1) % 2 == 0:
     checkpoint.save(file_prefix=checkpoint_prefix)

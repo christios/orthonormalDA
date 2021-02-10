@@ -196,10 +196,10 @@ class Network:
                 total_loss += batch_loss
                 iteration = int(self.optimizer.iterations)
                 progbar.update(i + 1)
-                # if iteration % 10 == 0:
-                #     print('Epoch {} Step {} Loss {:.4f}'.format(epoch + 1,
-                #                                                 iteration,
-                #                                                 batch_loss.numpy()))
+                if iteration % 10 == 0:
+                    print('Epoch {} Step {} Loss {:.4f}'.format(epoch + 1,
+                                                                iteration,
+                                                                batch_loss.numpy()))
 
             print('Epoch {} Loss {:.4f}'.format(epoch + 1,
                                                 total_loss / int(self.optimizer.iterations)))
@@ -208,7 +208,7 @@ class Network:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--batch_size", default=16,
+    parser.add_argument("--batch_size", default=,
                         type=int, help="Batch size.")
     parser.add_argument("--buffer_size", default=32000,
                         type=int, help="tf.Dataset buffer size.")
@@ -240,7 +240,7 @@ if __name__ == "__main__":
         with open('data/gumar', 'rb') as g:
             gumar = pickle.load(g)
     else:
-        gumar = GumarDataset('annotated-gumar-corpus')
+        gumar = GumarDataset('annotated-gumar-corpus', add_bow_eow=True, max_sentence_len=20)
         with open('data/gumar', 'wb') as g:
             pickle.dump(gumar, g)
 

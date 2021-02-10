@@ -1,3 +1,6 @@
+from sklearn.model_selection import train_test_split
+import io
+import unicodedata
 import os
 import zipfile
 from tqdm import tqdm
@@ -12,6 +15,7 @@ import numpy as np
 import pyarabic.araby as araby
 from edit_distance import SequenceMatcher
 from nltk import edit_distance, masi_distance
+import tensorflow as tf
 
 ALEFAT = araby.ALEFAT[:5] + tuple(araby.ALEFAT[-1])
 ALEFAT_PATTERN = re.compile(u"[" + u"".join(ALEFAT) + u"]", re.UNICODE)
@@ -57,7 +61,8 @@ class GumarDataset:
 
             self.words_vocab = train.words_vocab if train else {
                 "<pad>": self.PAD, "<unk>": self.UNK, "<bos>": self.BOS, "<eos>": self.EOS}
-            self.words_map = train.words_map if train else ["<pad>", "<unk>", "<bos>", "<eos>"]
+            self.words_map = train.words_map if train else [
+                "<pad>", "<unk>", "<bos>", "<eos>"]
             self.sentences_words_ids = []
             self.sentences_words = []
             self.characters = characters
@@ -109,40 +114,47 @@ class GumarDataset:
 
             # Create factors
             self._data = []
+            # for f in range(self.FACTORS):
+            #     self._data.append(GumarDataset.Factor(
+            #         f in [self.SOURCE, self.TARGET], train._data[f] if train else None))
             for f in range(self.FACTORS):
                 self._data.append(GumarDataset.Factor(
-                    f in [self.SOURCE, self.TARGET], train._data[f] if train else None))
+                    False, train._data[f] if train else None))
 
-            data_xml = ET.parse(data_file).getroot()
-            for idx, sentence in tqdm(enumerate(data_xml)):
-                if idx in GumarDataset.Dataset.EXCLUSIONS[name.lower()]:
-                    continue
-                src_temp = sentence[0].text
-                src_temp = GumarDataset.preprocess(src_temp)
-                src_temp = src_temp.split(' ')
-                src_temp = [token for token in src_temp if token]
+            for src_temp, tgt_temp in zip(data_file[0], data_file[1]):
 
-                tgt_temp = sentence[1].text
-                tgt_temp = GumarDataset.preprocess(tgt_temp)
-                tgt_temp = tgt_temp.split(' ')
-                tgt_temp = [token for token in tgt_temp if token]
+                # data_xml = ET.parse(data_file).getroot()
+                # for idx, sentence in tqdm(enumerate(data_xml)):
+                #     if idx in GumarDataset.Dataset.EXCLUSIONS[name.lower()]:
+                #         continue
+                # src_temp = sentence[0].text
+                # src_temp = GumarDataset.preprocess(src_temp)
+                src_temp = src_temp.split(' ')[1:-1]
+                # src_temp = [token for token in src_temp if token]
+
+                # tgt_temp = sentence[1].text
+                # tgt_temp = GumarDataset.preprocess(tgt_temp)
+                tgt_temp = tgt_temp.split(' ')[1:-1]
+                # tgt_temp = [token for token in tgt_temp if token]
+
+                src, tgt = src_temp, tgt_temp
 
                 # Drop different-length and empty sentences
                 if not (src_temp and tgt_temp):
                     continue
                 # Align src and tgt or discard example
-                try:
-                    src_temp = [[token, 'n'] for token in src_temp]
-                    tgt_temp = [[token, 'n'] for token in tgt_temp]
-                    src, tgt = GumarDataset.align(src_temp, tgt_temp)
-                except:
-                    GumarDataset.Dataset.EXCLUSIONS[name].append(idx)
-                    continue
-                
-                check_src = (' '.join([s[0] for s in src_temp]), ' '.join(src))
-                check_tgt = (' '.join([t[0] for t in tgt_temp]), ' '.join(tgt))
-                if check_src[0] != check_src[1] or check_tgt[0] != check_tgt[1]:
-                    continue
+                # try:
+                #     src_temp = [[token, 'n'] for token in src_temp]
+                #     tgt_temp = [[token, 'n'] for token in tgt_temp]
+                #     src, tgt = GumarDataset.align(src_temp, tgt_temp)
+                # except:
+                #     GumarDataset.Dataset.EXCLUSIONS[name].append(idx)
+                #     continue
+
+                # check_src = (' '.join([s[0] for s in src_temp]), ' '.join(src))
+                # check_tgt = (' '.join([t[0] for t in tgt_temp]), ' '.join(tgt))
+                # if check_src[0] != check_src[1] or check_tgt[0] != check_tgt[1]:
+                #     continue
 
                 if max_sentence_len and len(src) > max_sentence_len:
                     continue
@@ -169,9 +181,11 @@ class GumarDataset:
                             if train:
                                 word = "<unk>"
                             else:
-                                factor.words_vocab[word] = len(factor.words_map)
+                                factor.words_vocab[word] = len(
+                                    factor.words_map)
                                 factor.words_map.append(word)
-                        factor.sentences_words_ids[-1].append(factor.words_vocab[word])
+                        factor.sentences_words_ids[-1].append(
+                            factor.words_vocab[word])
                         factor.sentences_words[-1].append(word)
 
                         # Character-level information
@@ -194,8 +208,10 @@ class GumarDataset:
                                 factor.sentences_chars_ids[-1][-1].append(
                                     GumarDataset.Factor.EOW)
                     if add_bow_eow:
-                        factor.sentences_words_ids[-1].append(GumarDataset.Factor.EOS)
-                        factor.sentences_words[-1].append(factor.words_map[GumarDataset.Factor.EOS])
+                        factor.sentences_words_ids[-1].append(
+                            GumarDataset.Factor.EOS)
+                        factor.sentences_words[-1].append(
+                            factor.words_map[GumarDataset.Factor.EOS])
                 if max_sentences and len(self._data[self.SOURCE].sentences_words_ids) >= max_sentences:
                     break
 
@@ -230,7 +246,7 @@ class GumarDataset:
                         np.zeros([batch_size, max_sentence_len], np.int32)))
                     for i in range(batch_size):
                         batch[-1].sentences_words_ids[i, :len(factor.sentences_words_ids[batch_perm[i]])
-                                           ] = factor.sentences_words_ids[batch_perm[i]]
+                                                      ] = factor.sentences_words_ids[batch_perm[i]]
 
                 # Character-level data
                 for f, factor in enumerate(self._data):
@@ -243,10 +259,10 @@ class GumarDataset:
                         [batch_size, max_sentence_len, max_word_len], np.int32)
                     for i in range(batch_size):
                         for j, sentence_chars in enumerate(factor.sentences_chars_ids[batch_perm[i]]):
-                            batch[f].sentences_chars_ids[i, j, :len(sentence_chars)] = sentence_chars
+                            batch[f].sentences_chars_ids[i, j, :len(
+                                sentence_chars)] = sentence_chars
 
                 yield batch
-
 
     @staticmethod
     def align_subsequences(src_sub, tgt_sub):
@@ -345,17 +361,16 @@ class GumarDataset:
         src, tgt = GumarDataset.align_subsequences(src_temp, tgt_temp)
         return src, tgt
 
-
     @staticmethod
     def soft_align(tgt, src, start, end):
         src = [token[0] for token in src[start:end] if token[1] != 'd']
         tgt = [token[0] for token in tgt[start:end] if token[1] != 'i']
-        
+
         flipped = False
         if len(tgt) < len(src):
             src, tgt = tgt, src
             flipped = True
-        
+
         I, J = len(tgt), len(src)
         alignment = []
         start = 0
@@ -389,7 +404,6 @@ class GumarDataset:
 
         return src, tgt, alignment, flipped
 
-
     @staticmethod
     def preprocess(sentence):
         sentence = araby.strip_tatweel(sentence)
@@ -411,17 +425,70 @@ class GumarDataset:
                  max_sentences: int = 0,
                  max_sentence_len: int = 0):
 
-        path = "{}.zip".format(dataset)
-        with zipfile.ZipFile(path, "r") as zip_file:
-            for dataset in ["TRAIN", "DEV", "TEST"]:
-                with zip_file.open(f"{os.path.splitext(path)[0]}/{dataset}_annotated_Gumar_corpus.xml", "r") as dataset_file:
-                    setattr(self, dataset.lower(), self.Dataset(dataset_file,
-                                                                train=self.train if dataset != "TRAIN" else None,
-                                                                shuffle_batches=dataset == "TRAIN",
-                                                                add_bow_eow=add_bow_eow,
-                                                                max_sentences=max_sentences,
-                                                                max_sentence_len=max_sentence_len,
-                                                                name=dataset.lower()))
+        # path = "{}.zip".format(dataset)
+        # with zipfile.ZipFile(path, "r") as zip_file:
+        #     for dataset in ["TRAIN", "DEV", "TEST"]:
+        #         with zip_file.open(f"{os.path.splitext(path)[0]}/{dataset}_annotated_Gumar_corpus.xml", "r") as dataset_file:
+        #             setattr(self, dataset.lower(), self.Dataset(dataset_file,
+        #                                                         train=self.train if dataset != "TRAIN" else None,
+        #                                                         shuffle_batches=dataset == "TRAIN",
+        #                                                         add_bow_eow=add_bow_eow,
+        #                                                         max_sentences=max_sentences,
+        #                                                         max_sentence_len=max_sentence_len,
+        #                                                         name=dataset.lower()))
+        path_to_zip = tf.keras.utils.get_file(
+            'spa-eng.zip', origin='http://storage.googleapis.com/download.tensorflow.org/data/spa-eng.zip',
+            extract=True)
+
+        path_to_file = os.path.dirname(path_to_zip)+"/spa-eng/spa.txt"
+        train_src, dev_src, train_tgt, dev_tgt = NMTDataset(
+            'en-spa').create_dataset(path_to_file, 30000)
+        for dataset in [(train_src, train_tgt, 'train'), (dev_src, dev_tgt, 'dev')]:
+            setattr(self, dataset[2], self.Dataset(dataset,
+                                                   train=None,
+                                                   add_bow_eow=add_bow_eow,
+                                                   max_sentences=max_sentences,
+                                                   max_sentence_len=max_sentence_len))
+
+
+class NMTDataset:
+    def __init__(self, problem_type='en-spa'):
+        self.problem_type = 'en-spa'
+        self.inp_lang_tokenizer = None
+        self.targ_lang_tokenizer = None
+
+    def unicode_to_ascii(self, s):
+        return ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
+
+    ## Step 1 and Step 2
+    def preprocess_sentence(self, w):
+        w = self.unicode_to_ascii(w.lower().strip())
+
+        # creating a space between a word and the punctuation following it
+        # eg: "he is a boy." => "he is a boy ."
+        # Reference:- https://stackoverflow.com/questions/3645931/python-padding-punctuation-with-white-spaces-keeping-punctuation
+        w = re.sub(r"([?.!,¿])", r" \1 ", w)
+        w = re.sub(r'[" "]+', " ", w)
+
+        # replacing everything with space except (a-z, A-Z, ".", "?", "!", ",")
+        w = re.sub(r"[^a-zA-Z?.!,¿]+", " ", w)
+
+        w = w.strip()
+
+        # adding a start and an end token to the sentence
+        # so that the model know when to start and stop predicting.
+        w = '<start> ' + w + ' <end>'
+        return w
+
+    def create_dataset(self, path, num_examples):
+        # path : path to spa-eng.txt file
+        # num_examples : Limit the total number of training example for faster training (set num_examples = len(lines) to use full data)
+        lines = io.open(path, encoding='UTF-8').read().strip().split('\n')
+        word_pairs = [[self.preprocess_sentence(w) for w in l.split(
+            '\t')] for l in lines[:num_examples]]
+        word_pairs = list(zip(*word_pairs))
+
+        return train_test_split(word_pairs[0], word_pairs[1], test_size=0.2)
 
 
 if __name__ == "__main__":
@@ -447,12 +514,14 @@ if __name__ == "__main__":
     #     for ex in useful_examples:
     #         if edit_distance(ex[0], ex[1]) == i:
     #             dubious.setdefault(i, []).append(ex)
-    
+
     # gumar = GumarDataset('annotated-gumar-corpus')
     # with open('data/gumar', 'wb') as g:
     #     pickle.dump(gumar, g)
-    with open('data/gumar', 'rb') as g:
-        gumar = pickle.load(g)
-        tokens = [token for sent in gumar.train.data[1].sentences_words for token in sent]
-        tokens_fl = Counter(tokens).most_common()
-        pass
+    # with open('data/gumar', 'rb') as g:
+    #     gumar = pickle.load(g)
+    #     tokens = [token for sent in gumar.train.data[1].sentences_words for token in sent]
+    #     tokens_fl = Counter(tokens).most_common()
+    #     pass
+    gumar = GumarDataset('annotated-gumar-corpus')
+    pass

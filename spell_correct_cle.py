@@ -183,7 +183,7 @@ class Network:
             # matrix of sequences, some of them padding ones. The encoder
             # just takes in words (not sentences), this is why we need to remove
             # paddings that acted as words to build the batch. Hence, each batch has a 
-            # a ddifferent maximum sequence length.
+            # a different maximum sequence length.
             valid_words = tf.cast(
                 tf.where(source_sentences_chars[:, :, 0] != 0), tf.int32)
             # shape after `tf.gather_nd` == (# words (i.e., excluding words which are fully padded), length of longest word)
@@ -285,10 +285,12 @@ class Network:
 
             # Compute whole coda accuracy
             targets = self.append_eow(batch[dataset.TARGET].sentences_chars_ids)
+            # Make `predictions` the same shape as the `targets` by padding zeros
             resized_predictions = np.concatenate(
                 [predictions, np.zeros_like(targets)], axis=2)[:, :, :targets.shape[2]]
+            # shape: (batch_size, words) with True wherever the first character
+            # of a word is not EOW
             valid_coda_forms = targets[:, :, 0] != GumarDataset.Factor.EOW
-
             total_coda_forms += np.sum(valid_coda_forms)
             correct_coda_forms += np.sum(valid_coda_forms * np.all(targets ==
                                                            resized_predictions * (targets != 0), axis=2))

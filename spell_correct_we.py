@@ -230,21 +230,23 @@ class Network:
         self.writer = tf.summary.create_file_writer(
             args.logdir, flush_millis=10 * 1000)
 
-    def append_eow(self, sequences):
+    def append_eos(self, sequences):
         """Append EOW character after end of every given sequence."""
         # Add one <pad> char to each word
-        padded_sequences = np.pad(sequences, [[0, 0], [0, 0], [0, 1]])
+        padded_sequences = np.pad(sequences, [[0, 0], [0, 1]])
         # padded_sequences != 0 is the same array with True wherever the cell is != 0
         ends = np.logical_xor(padded_sequences != 0, np.pad(
-            sequences, [[0, 0], [0, 0], [1, 0]], constant_values=1) != 0)
+            sequences, [[0, 0], [1, 0]], constant_values=1) != 0)
         # Add <eow> to each word before its padding starts
-        padded_sequences[ends] = GumarDataset.Factor.EOW
+        padded_sequences[ends] = GumarDataset.Factor.EOS
         return padded_sequences
 
     def train_epoch(self, dataset, args):
+        # for i, batch in enumerate(dataset.take(steps_per_epoch)):
+        #     sources, targets = batch[0], batch[1]
         for batch in dataset.batches(args.batch_size):
             # Create `targets` by appending EOW after target words
-            targets = batch[dataset.TARGET].sentences_words_ids
+            targets = self.append_eos(batch[dataset.TARGET].sentences_words_ids)
             sources = batch[dataset.SOURCE].sentences_words_ids
             metrics = self.spelling_corrector.train_on_batch(x=[sources, targets],
                                                              y=targets)
@@ -258,14 +260,14 @@ class Network:
                 predictions = self.predict_batch(
                     batch[dataset.SOURCE].sentences_words_ids[:1]).numpy()
 
-                raw = "".join(dataset.data[dataset.SOURCE].words_map[i]
+                raw = " ".join(dataset.data[dataset.SOURCE].words_map[i]
                               for i in batch[dataset.SOURCE].sentences_words_ids[0] if i)
-                gold_coda = "".join(
+                gold_coda = " ".join(
                     dataset.data[dataset.TARGET].words_map[i] for i in targets[0] if i)
-                system_coda = "".join(dataset.data[dataset.TARGET].words_map[i]
+                system_coda = " ".join(dataset.data[dataset.TARGET].words_map[i]
                                       for i in predictions[0] if i != GumarDataset.Factor.EOW)
                 status = ", ".join([*["{}={:.4f}".format(name, value) for name, value in metrics.items()],
-                                    "{} {} {}".format(raw, gold_coda, system_coda)])
+                                    "\n{}\n{}\n{}".format(raw, gold_coda, system_coda)])
                 print("Step {}:".format(iteration), status)
 
                 with self.writer.as_default():
@@ -284,15 +286,14 @@ class Network:
                 batch[dataset.SOURCE].sentences_words_ids).numpy()
 
             # Compute whole coda accuracy
-            targets = self.append_eow(
+            targets = self.append_eos(
                 batch[dataset.TARGET].sentences_words_ids)
             resized_predictions = np.concatenate(
-                [predictions, np.zeros_like(targets)], axis=1)[:, :targets.shape[2]]
-            valid_coda_forms = targets[:, 0] != GumarDataset.Factor.EOW
-
-            total_coda_forms += np.sum(valid_coda_forms)
-            correct_coda_forms += np.sum(valid_coda_forms * np.all(targets ==
-                                                                   resized_predictions * (targets != 0), axis=1))
+                [predictions, np.zeros_like(targets)], axis=1)[:, :targets.shape[1]]
+            total_coda_forms += np.sum(
+                batch[dataset.TARGET].sentences_words_ids != GumarDataset.Factor.PAD)
+            correct_coda_forms += np.sum(np.all(targets == resized_predictions * (
+                targets != GumarDataset.Factor.PAD), axis=1))
 
         metrics = {"coda_accuracy": correct_coda_forms / total_coda_forms}
         with self.writer.as_default():
@@ -364,9 +365,37 @@ if __name__ == "__main__":
         with open('data/gumar', 'rb') as g:
             gumar = pickle.load(g)
     else:
-        gumar = GumarDataset('annotated-gumar-corpus')
+        gumar = GumarDataset(dataset='annotated-gumar-corpus',
+                            #  max_sentences=2000,
+                             max_sentence_len=20)
         with open('data/gumar', 'wb') as g:
             pickle.dump(gumar, g)
+
+    # from seq2seq_nmt import NMTDataset
+    # BUFFER_SIZE = 32000
+    # BATCH_SIZE = 64
+    # # Let's limit the #training examples for faster training
+    # num_examples = 30000
+
+    # dataset_creator = NMTDataset('en-spa')
+    # train_dataset, val_dataset, inp_lang, targ_lang = dataset_creator.call(
+    #     num_examples, BUFFER_SIZE, BATCH_SIZE)
+
+    # vocab_inp_size = len(inp_lang.word_index)+1
+    # vocab_tar_size = len(targ_lang.word_index)+1
+
+    # embedding_dim = 256
+    # units = 1024
+    # steps_per_epoch = num_examples//BATCH_SIZE
+
+    # network = Network(args,
+    #                   src_chars_vocab_len=vocab_inp_size,
+    #                   tgt_chars_vocab_len=vocab_tar_size)
+
+    # for epoch in range(args.epochs):
+    #     network.train_epoch(train_dataset, args)
+    #     metrics = network.evaluate(val_dataset, "dev", args)
+    #     print("Evaluation on {}, epoch {}: {}".format("dev", epoch + 1, metrics))
 
     # Create the network and train
     network = Network(args,
