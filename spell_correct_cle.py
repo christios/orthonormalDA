@@ -182,7 +182,8 @@ class Network:
             # so that it is a list of valid sequences, instead of a
             # matrix of sequences, some of them padding ones. The encoder
             # just takes in words (not sentences), this is why we need to remove
-            # paddings that acted as words to build the batch.
+            # paddings that acted as words to build the batch. Hence, each batch has a 
+            # a ddifferent maximum sequence length.
             valid_words = tf.cast(
                 tf.where(source_sentences_chars[:, :, 0] != 0), tf.int32)
             # shape after `tf.gather_nd` == (# words (i.e., excluding words which are fully padded), length of longest word)

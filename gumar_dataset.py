@@ -143,6 +143,9 @@ class GumarDataset:
                 if check_src[0] != check_src[1] or check_tgt[0] != check_tgt[1]:
                     continue
 
+                if len(src) > 20:
+                    continue
+
                 for f in range(self.FACTORS):
                     factor = self._data[f]
                     if len(factor.sentences_words_ids):

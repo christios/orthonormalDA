@@ -1,384 +1,384 @@
 import tensorflow as tf
-from sklearn.model_selection import train_test_split
-
-import unicodedata
+import tensorflow_addons as tfa
 import re
 import numpy as np
 import os
-import io
-import time
-
-# Download the file
-path_to_zip = tf.keras.utils.get_file(
-    'spa-eng.zip', origin='http://storage.googleapis.com/download.tensorflow.org/data/spa-eng.zip',
-    extract=True)
-
-path_to_file = os.path.dirname(path_to_zip)+"/spa-eng/spa.txt"
-
-# Converts the unicode file to ascii
-
-
-def unicode_to_ascii(s):
-    return ''.join(c for c in unicodedata.normalize('NFD', s)
-                   if unicodedata.category(c) != 'Mn')
-
-
-def preprocess_sentence(w):
-    w = unicode_to_ascii(w.lower().strip())
-
-    # creating a space between a word and the punctuation following it
-    # eg: "he is a boy." => "he is a boy ."
-    # Reference:- https://stackoverflow.com/questions/3645931/python-padding-punctuation-with-white-spaces-keeping-punctuation
-    w = re.sub(r"([?.!,¿])", r" \1 ", w)
-    w = re.sub(r'[" "]+', " ", w)
-
-    # replacing everything with space except (a-z, A-Z, ".", "?", "!", ",")
-    w = re.sub(r"[^a-zA-Z?.!,¿]+", " ", w)
-
-    w = w.strip()
-
-    # adding a start and an end token to the sentence
-    # so that the model know when to start and stop predicting.
-    w = '<start> ' + w + ' <end>'
-    return w
-
-
-en_sentence = u"May I borrow this book?"
-sp_sentence = u"¿Puedo tomar prestado este libro?"
-print(preprocess_sentence(en_sentence))
-print(preprocess_sentence(sp_sentence).encode('utf-8'))
-
-# 1. Remove the accents
-# 2. Clean the sentences
-# 3. Return word pairs in the format: [ENGLISH, SPANISH]
-
-
-def create_dataset(path, num_examples):
-    lines = io.open(path, encoding='UTF-8').read().strip().split('\n')
-
-    word_pairs = [[preprocess_sentence(w) for w in l.split('\t')]
-                  for l in lines[:num_examples]]
-
-    return zip(*word_pairs)
-
-
-en, sp = create_dataset(path_to_file, None)
-print(en[-1])
-print(sp[-1])
-
-
-def tokenize(lang):
-    lang_tokenizer = tf.keras.preprocessing.text.Tokenizer(
-        filters='')
-    lang_tokenizer.fit_on_texts(lang)
-
-    tensor = lang_tokenizer.texts_to_sequences(lang)
-
-    tensor = tf.keras.preprocessing.sequence.pad_sequences(tensor,
-                                                           padding='post')
-
-    return tensor, lang_tokenizer
-
-
-def load_dataset(path, num_examples=None):
-    # creating cleaned input, output pairs
-    targ_lang, inp_lang = create_dataset(path, num_examples)
-
-    input_tensor, inp_lang_tokenizer = tokenize(inp_lang)
-    target_tensor, targ_lang_tokenizer = tokenize(targ_lang)
-
-    return input_tensor, target_tensor, inp_lang_tokenizer, targ_lang_tokenizer
-
-
-# Try experimenting with the size of that dataset
-num_examples = 30000
-input_tensor, target_tensor, inp_lang, targ_lang = load_dataset(
-    path_to_file, num_examples)
-
-# Calculate max_length of the target tensors
-max_length_targ, max_length_inp = target_tensor.shape[1], input_tensor.shape[1]
-
-# Creating training and validation sets using an 80-20 split
-input_tensor_train, input_tensor_val, target_tensor_train, target_tensor_val = train_test_split(
-    input_tensor, target_tensor, test_size=0.2)
-
-# Show length
-print(len(input_tensor_train), len(target_tensor_train),
-      len(input_tensor_val), len(target_tensor_val))
-
-
-def convert(lang, tensor):
-    for t in tensor:
-        if t != 0:
-            print("%d ----> %s" % (t, lang.index_word[t]))
-
-
-print("Input Language; index to word mapping")
-convert(inp_lang, input_tensor_train[0])
-print()
-print("Target Language; index to word mapping")
-convert(targ_lang, target_tensor_train[0])
-
-
-BUFFER_SIZE = len(input_tensor_train)
-BATCH_SIZE = 64
-steps_per_epoch = len(input_tensor_train)//BATCH_SIZE
-embedding_dim = 256
-units = 1024
-vocab_inp_size = len(inp_lang.word_index)+1
-vocab_tar_size = len(targ_lang.word_index)+1
-
-dataset = tf.data.Dataset.from_tensor_slices(
-    (input_tensor_train, target_tensor_train)).shuffle(BUFFER_SIZE)
-dataset = dataset.batch(BATCH_SIZE, drop_remainder=True)
-
-
-example_input_batch, example_target_batch = next(iter(dataset))
-example_input_batch.shape, example_target_batch.shape
-
-
-class Encoder(tf.keras.Model):
-    def __init__(self, vocab_size, embedding_dim, enc_units, batch_sz):
-        super(Encoder, self).__init__()
-        self.batch_sz = batch_sz
-        self.enc_units = enc_units
-        self.embedding = tf.keras.layers.Embedding(vocab_size, embedding_dim)
-        self.gru = tf.keras.layers.GRU(self.enc_units,
-                                       return_sequences=True,
-                                       return_state=True,
-                                       recurrent_initializer='glorot_uniform')
-
-    def call(self, x, hidden):
-        x = self.embedding(x)
-        output, state = self.gru(x, initial_state=hidden)
-        return output, state
-
-    def initialize_hidden_state(self):
-        return tf.zeros((self.batch_sz, self.enc_units))
-
-
-encoder = Encoder(vocab_inp_size, embedding_dim, units, BATCH_SIZE)
-
-# sample input
-sample_hidden = encoder.initialize_hidden_state()
-sample_output, sample_hidden = encoder(example_input_batch, sample_hidden)
-print('Encoder output shape: (batch size, sequence length, units) {}'.format(
-    sample_output.shape))
-print('Encoder Hidden state shape: (batch size, units) {}'.format(sample_hidden.shape))
-
-
-class BahdanauAttention(tf.keras.layers.Layer):
-    def __init__(self, units):
-        super(BahdanauAttention, self).__init__()
-        self.W1 = tf.keras.layers.Dense(units)
-        self.W2 = tf.keras.layers.Dense(units)
-        self.V = tf.keras.layers.Dense(1)
-
-    def call(self, query, values):
-        # query hidden state shape == (batch_size, hidden size)
-        # query_with_time_axis shape == (batch_size, 1, hidden size)
-        # values shape == (batch_size, max_len, hidden size)
-        # we are doing this to broadcast addition along the time axis to calculate the score
-        query_with_time_axis = tf.expand_dims(query, 1)
-
-        # score shape == (batch_size, max_length, 1)
-        # we get 1 at the last axis because we are applying score to self.V
-        # the shape of the tensor before applying self.V is (batch_size, max_length, units)
-        score = self.V(tf.nn.tanh(
-            self.W1(query_with_time_axis) + self.W2(values)))
-
-        # attention_weights shape == (batch_size, max_length, 1)
-        attention_weights = tf.nn.softmax(score, axis=1)
-
-        # context_vector shape after sum == (batch_size, hidden_size)
-        context_vector = attention_weights * values
-        context_vector = tf.reduce_sum(context_vector, axis=1)
-
-        return context_vector, attention_weights
-
-
-attention_layer = BahdanauAttention(10)
-attention_result, attention_weights = attention_layer(
-    sample_hidden, sample_output)
-
-print("Attention result shape: (batch size, units) {}".format(attention_result.shape))
-print("Attention weights shape: (batch_size, sequence_length, 1) {}".format(
-    attention_weights.shape))
-
-
-class Decoder(tf.keras.Model):
-    def __init__(self, vocab_size, embedding_dim, dec_units, batch_sz):
-        super(Decoder, self).__init__()
-        self.batch_sz = batch_sz
-        self.dec_units = dec_units
-        self.embedding = tf.keras.layers.Embedding(vocab_size, embedding_dim)
-        self.gru = tf.keras.layers.GRU(self.dec_units,
-                                       return_sequences=True,
-                                       return_state=True,
-                                       recurrent_initializer='glorot_uniform')
-        self.fc = tf.keras.layers.Dense(vocab_size)
-
-        # used for attention
-        self.attention = BahdanauAttention(self.dec_units)
-
-    def call(self, x, hidden, enc_output):
-        # enc_output shape == (batch_size, max_length, hidden_size)
-        context_vector, attention_weights = self.attention(hidden, enc_output)
-
-        # x shape after passing through embedding == (batch_size, 1, embedding_dim)
-        x = self.embedding(x)
-
-        # x shape after concatenation == (batch_size, 1, embedding_dim + hidden_size)
-        x = tf.concat([tf.expand_dims(context_vector, 1), x], axis=-1)
-
-        # passing the concatenated vector to the GRU
-        output, state = self.gru(x)
-
-        # output shape == (batch_size * 1, hidden_size)
-        output = tf.reshape(output, (-1, output.shape[2]))
-
-        # output shape == (batch_size, vocab)
-        x = self.fc(output)
-
-        return x, state, attention_weights
-
-
-decoder = Decoder(vocab_tar_size, embedding_dim, units, BATCH_SIZE)
-
-sample_decoder_output, _, _ = decoder(tf.random.uniform((BATCH_SIZE, 1)),
-                                      sample_hidden, sample_output)
-
-print('Decoder output shape: (batch_size, vocab size) {}'.format(
-    sample_decoder_output.shape))
-
-
-optimizer = tf.keras.optimizers.Adam()
-loss_object = tf.keras.losses.SparseCategoricalCrossentropy(
-    from_logits=True, reduction='none')
-
-
-def loss_function(real, pred):
-    mask = tf.math.logical_not(tf.math.equal(real, 0))
-    loss_ = loss_object(real, pred)
-
-    mask = tf.cast(mask, dtype=loss_.dtype)
-    loss_ *= mask
-
-    return tf.reduce_mean(loss_)
-
-
-checkpoint_dir = './training_checkpoints'
-checkpoint_prefix = os.path.join(checkpoint_dir, "ckpt")
-checkpoint = tf.train.Checkpoint(optimizer=optimizer,
-                                 encoder=encoder,
-                                 decoder=decoder)
-
-
-@tf.function
-def train_step(inp, targ, enc_hidden):
-    loss = 0
-
-    with tf.GradientTape() as tape:
-        enc_output, enc_hidden = encoder(inp, enc_hidden)
-
-        dec_hidden = enc_hidden
-
-        dec_input = tf.expand_dims(
-            [targ_lang.word_index['<start>']] * BATCH_SIZE, 1)
-
-        # Teacher forcing - feeding the target as the next input
-        for t in range(1, targ.shape[1]):
-            # passing enc_output to the decoder
-            predictions, dec_hidden, _ = decoder(
-                dec_input, dec_hidden, enc_output)
-
-            loss += loss_function(targ[:, t], predictions)
-
-            # using teacher forcing
-            dec_input = tf.expand_dims(targ[:, t], 1)
-
-    batch_loss = (loss / int(targ.shape[1]))
-
-    variables = encoder.trainable_variables + decoder.trainable_variables
-
-    gradients = tape.gradient(loss, variables)
-
-    optimizer.apply_gradients(zip(gradients, variables))
-
-    return batch_loss
-
-
-EPOCHS = 10
-
-for epoch in range(EPOCHS):
-    start = time.time()
-
-    enc_hidden = encoder.initialize_hidden_state()
-    total_loss = 0
-
-    for (batch, (inp, targ)) in enumerate(dataset.take(steps_per_epoch)):
-        batch_loss = train_step(inp, targ, enc_hidden)
-        total_loss += batch_loss
-
-        if batch % 100 == 0:
-            print('Epoch {} Batch {} Loss {:.4f}'.format(epoch + 1,
-                                                         batch,
-                                                         batch_loss.numpy()))
-    # saving (checkpoint) the model every 2 epochs
-    if (epoch + 1) % 2 == 0:
-        checkpoint.save(file_prefix=checkpoint_prefix)
-
-    print('Epoch {} Loss {:.4f}'.format(
-        epoch + 1, total_loss / steps_per_epoch))
-    print('Time taken for 1 epoch {} sec\n'.format(time.time() - start))
-
-
-def evaluate(sentence):
-    attention_plot = np.zeros((max_length_targ, max_length_inp))
-
-    sentence = preprocess_sentence(sentence)
-
-    inputs = [inp_lang.word_index[i] for i in sentence.split(' ')]
-    inputs = tf.keras.preprocessing.sequence.pad_sequences([inputs],
-                                                           maxlen=max_length_inp,
-                                                           padding='post')
-    inputs = tf.convert_to_tensor(inputs)
-
-    result = ''
-
-    hidden = [tf.zeros((1, units))]
-    enc_out, enc_hidden = encoder(inputs, hidden)
-
-    dec_hidden = enc_hidden
-    dec_input = tf.expand_dims([targ_lang.word_index['<start>']], 0)
-
-    for t in range(max_length_targ):
-        predictions, dec_hidden, attention_weights = decoder(
-            dec_input, dec_hidden, enc_out)
-
-        # storing the attention weights to plot later on
-        attention_weights = tf.reshape(attention_weights, (-1, ))
-        attention_plot[t] = attention_weights.numpy()
-
-        predicted_id = tf.argmax(predictions[0]).numpy()
-
-        result += targ_lang.index_word[predicted_id] + ' '
-
-        if targ_lang.index_word[predicted_id] == '<end>':
-            return result, sentence, attention_plot
-
-        # the predicted ID is fed back into the model
-        dec_input = tf.expand_dims([predicted_id], 0)
-
-    return result, sentence, attention_plot
-
-
-def translate(sentence):
-    result, sentence, attention_plot = evaluate(sentence)
-
-    print('Input: %s' % (sentence))
-    print('Predicted translation: {}'.format(result))
-
-    attention_plot = attention_plot[:len(
-        result.split(' ')), :len(sentence.split(' '))]
-    plot_attention(attention_plot, sentence.split(' '), result.split(' '))
+import datetime
+import argparse
+import pickle
+
+from gumar_dataset import GumarDataset
+
+
+class Network:
+
+    class SpellingCorrector(tf.keras.Model):
+        def __init__(self, args, src_chars_vocab_len, tgt_chars_vocab_len):
+            super().__init__()
+
+            self.tgt_chars_vocab_len = tgt_chars_vocab_len
+
+            self.source_embedding = tf.keras.layers.Embedding(
+                input_dim=src_chars_vocab_len, output_dim=args.cle_dim, mask_zero=True)
+            # units does not refer to the number of character to be inputted to the encoder
+            # but to the hidden state size
+            gru_cell = tf.keras.layers.GRU(
+                units=args.rnn_dim, return_sequences=True)
+            self.source_rnn = tf.keras.layers.Bidirectional(
+                layer=gru_cell, merge_mode='sum')
+
+            self.target_embedding = tf.keras.layers.Embedding(
+                input_dim=tgt_chars_vocab_len, output_dim=args.cle_dim, mask_zero=False)
+            # Use Cell because we will be generating them one by one
+            self.target_rnn_cell = tf.keras.layers.GRUCell(units=args.rnn_dim)
+            self.target_output_layer = tf.keras.layers.Dense(
+                units=tgt_chars_vocab_len)
+
+            self.attention_source_layer = tf.keras.layers.Dense(
+                units=args.rnn_dim)
+            self.attention_state_layer = tf.keras.layers.Dense(
+                units=args.rnn_dim)
+            self.attention_weight_layer = tf.keras.layers.Dense(units=1)
+
+        class DecoderTraining(tfa.seq2seq.BaseDecoder):
+            def __init__(self, spelling_corrector, *args, **kwargs):
+                self.spelling_corrector = spelling_corrector
+                super().__init__.__wrapped__(self, *args, **kwargs)
+
+            @property
+            def batch_size(self):
+                return tf.shape(self.source_states)[0]
+
+            @property
+            def output_size(self):
+                # `tgt_chars_vocab_len` is the number of logits per each output element
+                return tf.TensorShape(self.spelling_corrector.tgt_chars_vocab_len)
+
+            @property
+            def output_dtype(self):
+                # Type of the logits
+                return tf.float32
+
+            def with_attention(self, inputs, states):
+                """Implementation of Bahdanau attention.
+                `W1`, `W2`, and `V` are the attention weights which
+                will be learned by the network. At each decoding step,
+                we are adding the decoder hidden state to each encoder
+                hidden state.
+                - score = FC(tanh(FC(EO) + FC(H))) [with EO -> encoder output and
+                    H -> decoder hidden state size (rnn_dim)]
+                - attention weights = softmax(score, axis = 1)
+                - context vector = sum(attention weights * EO, axis = 1)
+
+                Args:
+                    inputs (tf.Tensor): 
+                    states (tf.Tensor): Query vector with shape == (batch_size, H)
+                                        which is the hidden state vector of the previously decoded
+                                        hidden state.
+
+                Returns:
+                    list: inputs to the encoder and the attention vector
+                """
+                V = self.spelling_corrector.attention_weight_layer
+                # W1_hd shape == (batch_size, H) -> how much of the decoder state am I passing?
+                W1_hd = self.spelling_corrector.attention_state_layer(states)
+                # `self.source_states` is the vector of encoder hidden states
+                # `self.source_states` shape == (batch_size, max_length, H)
+                # W2_he shape == (batch_size, max_length, H) -> how much of each encoder state am I passing?
+                W2_he = self.spelling_corrector.attention_source_layer(
+                    self.source_states)
+                # Need to expand W1_hd shape to (batch_size, 1, H) for broadcasting to apply during addition
+                # score shape before V == (batch_size, max_length, H)
+                # score shape after V == (batch_size, max_length, 1) -> score for each input word/character
+                score = V(tf.nn.tanh(tf.expand_dims(W1_hd, 1) + W2_he))
+                # Softmax by default is applied on the last axis but here we want to apply it on the 1st axis,
+                # since the shape of score is (batch_size, max_length, 1). max_length is the length
+                # of our input. Since we are trying to assign a weight to each input, softmax should be applied
+                # on that axis.
+                # weights shape == (batch_size, max_length, 1) -> one weight for each input word/character
+                weights = tf.nn.softmax(score, axis=1)
+                # Multiply each word by its corresponding weight
+                attention = weights * self.source_states
+                # attention shape == (batch_size, H)
+                attention = tf.reduce_sum(attention, axis=1)
+                # This result is fed back into the currently decoded cell
+                return tf.keras.layers.concatenate([inputs, attention])
+
+            def initialize(self, layer_inputs, initial_state=None, mask=None):
+                self.source_states, self.targets = layer_inputs
+                finished = tf.fill([self.batch_size], False)
+                # Decoder inputs
+                inputs = self.spelling_corrector.target_embedding(
+                    tf.fill([self.batch_size], GumarDataset.Factor.BOW))
+                # Initialization: since no character has been decoded yet,
+                # we use the first word/character of the encoder input as a fake
+                # decoder hidden state. The idea is that it is most relevant for decoding
+                # the first letter and contains all following characters via the backward RNN.
+                states = self.source_states[:, 0, :]
+                inputs = self.with_attention(inputs, states)
+                return finished, inputs, states
+
+            def step(self, time, inputs, states, training):
+                """Teacher forcing mode, feeding in training gold manually."""
+                # `states` is the hidden state of previous decoder cell
+                outputs, [states] = self.spelling_corrector.target_rnn_cell(inputs, [
+                                                                            states])
+                # Overwrite `outputs` by passing them through the prediction layer
+                outputs = self.spelling_corrector.target_output_layer(outputs)
+                # self.targets[:, time] is the `time`-th char/word
+                # self.targets[:, time] shape == (batch_size, 1, cle_dim)
+                next_inputs = self.spelling_corrector.target_embedding(
+                    self.targets[:, time])
+                # `finished` is True if `time`-th char from `self.targets` is EOW, False otherwise
+                finished = (self.targets[:, time] == GumarDataset.Factor.EOW)
+                # Pass `next_inputs` and `states` (hidden state of previous decoder cell) to the attention layer
+                next_inputs = self.with_attention(next_inputs, states)
+                return outputs, states, next_inputs, finished
+
+        class DecoderPrediction(DecoderTraining):
+            @property
+            def output_size(self):
+                # Describes a scalar element, because we are generating scalar predictions now.
+                return tf.TensorShape([])
+
+            @property
+            def output_dtype(self):
+                return tf.int32
+
+            def initialize(self, layer_inputs, initial_state=None, mask=None):
+                self.source_states = layer_inputs
+                # Use the same initialization as in DecoderTraining.
+                finished = tf.fill([self.batch_size], False)
+                inputs = self.spelling_corrector.target_embedding(
+                    tf.fill([self.batch_size], GumarDataset.Factor.BOW))
+                states = self.source_states[:, 0, :]
+                inputs = self.with_attention(inputs, states)
+                return finished, inputs, states
+
+            def step(self, time, inputs, states, training):
+                """Autoregressive mode."""
+                outputs, [states] = self.spelling_corrector.target_rnn_cell(inputs, [
+                    states])
+                outputs = self.spelling_corrector.target_output_layer(outputs)
+                # Choose best character/word (with highest value)
+                # axis 0 is the batch level, and axis 1 is the logits level (of dimension self.tgt_chars_vocab_len)
+                outputs = tf.argmax(outputs, axis=1, output_type=tf.int32)
+                # Autoregressive generation
+                next_inputs = self.spelling_corrector.target_embedding(outputs)
+                finished = (outputs == GumarDataset.Factor.EOW)
+                next_inputs = self.with_attention(next_inputs, states)
+                return outputs, states, next_inputs, finished
+
+        def call(self, inputs):
+            # If `inputs` is a list of two elements, we are in the teacher forcing mode.
+            # Otherwise, we run in autoregressive mode.
+            if isinstance(inputs, list) and len(inputs) == 2:
+                source_sentences_chars, target_sentences_chars = inputs
+            else:
+                source_sentences_chars, target_sentences_chars = inputs, None
+            source_sentences_chars_shape = tf.shape(source_sentences_chars)
+
+            # Encoder:
+            # Get indices of valid words and reshape the `source_sentences_chars`
+            # so that it is a list of valid sequences, instead of a
+            # matrix of sequences, some of them made up of padding exclusively. The encoder
+            # just takes in words (not sentences), this is why we need to remove
+            # paddings that acted as words to build the batch.
+            # valid_words = tf.cast(
+            #     tf.where(source_sentences_chars[:, :, 0] != 0), tf.int32)
+            # # shape after `tf.gather_nd` == (# words (i.e., excluding words which are fully padded), length of longest word)
+            # source_sentences_chars = tf.gather_nd(source_sentences_chars, valid_words)
+            # if target_sentences_chars is not None:
+            #     target_sentences_chars = tf.gather_nd(target_sentences_chars, valid_words)
+
+            source_embedding = self.source_embedding(source_sentences_chars)
+            source_states = self.source_rnn(source_embedding)
+
+            # Run the appropriate decoder
+            if target_sentences_chars is not None:
+                decoderTraining = self.DecoderTraining(self)
+                output_layer, _, output_lens = decoderTraining(
+                    [source_states, target_sentences_chars])
+            else:
+                # tf.shape(source_sentences_chars)[1] + 10 indicates that the longest prediction
+                # must be at most 10 characters longer than the longest input.
+                # Then run it on `source_states`, storing the first result
+                # in `output_layer` and the third result in `output_lens`.
+                decoderPrediction = self.DecoderPrediction(
+                    self, maximum_iterations=tf.shape(source_sentences_chars)[1] + 10)
+                output_layer, _, output_lens = decoderPrediction(source_states)
+
+            # Reshape the output to the original matrix of words
+            # and explicitly set mask for loss and metric computation.
+            # output_layer = tf.scatter_nd(valid_words, output_layer, tf.concat(
+            #     [source_sentences_chars_shape[:2], tf.shape(output_layer)[1:]], axis=0))
+            # output_layer._keras_mask = tf.sequence_mask(tf.scatter_nd(
+            #     valid_words, output_lens, source_sentences_chars_shape[:2]))
+            return output_layer
+
+    def __init__(self, args, src_chars_vocab_len, tgt_chars_vocab_len):
+        self.exceptions = 0
+        self.spelling_corrector = self.SpellingCorrector(
+            args, src_chars_vocab_len, tgt_chars_vocab_len)
+
+        self.spelling_corrector.compile(
+            optimizer=tf.optimizers.Adam(),
+            loss=tf.losses.SparseCategoricalCrossentropy(from_logits=True),
+            metrics=[tf.metrics.SparseCategoricalAccuracy(
+                name="character_accuracy")],
+        )
+        self.writer = tf.summary.create_file_writer(
+            args.logdir, flush_millis=10 * 1000)
+
+    def append_eow(self, sequences):
+        """Append EOW character after end of every given sequence."""
+        # Add one <pad> char to each word
+        padded_sequences = np.pad(sequences, [[0, 0], [0, 0], [0, 1]])
+        # padded_sequences != 0 is the same array with True wherever the cell is != 0
+        ends = np.logical_xor(padded_sequences != 0, np.pad(
+            sequences, [[0, 0], [0, 0], [1, 0]], constant_values=1) != 0)
+        # Add <eow> to each word before its padding starts
+        padded_sequences[ends] = GumarDataset.Factor.EOW
+        return padded_sequences
+
+    def train_epoch(self, dataset, args):
+        for batch in dataset.batches(args.batch_size):
+            # Create `targets` by appending EOW after target words
+            targets = batch[dataset.TARGET].sentences_words_ids
+            sources = batch[dataset.SOURCE].sentences_words_ids
+            metrics = self.spelling_corrector.train_on_batch(x=[sources, targets],
+                                                             y=targets)
+            # Generate the summaries each 10 steps
+            iteration = int(self.spelling_corrector.optimizer.iterations)
+            if iteration % 10 == 0:
+                tf.summary.experimental.set_step(iteration)
+                metrics = dict(
+                    zip(self.spelling_corrector.metrics_names, metrics))
+
+                predictions = self.predict_batch(
+                    batch[dataset.SOURCE].sentences_words_ids[:1]).numpy()
+
+                raw = "".join(dataset.data[dataset.SOURCE].words_map[i]
+                              for i in batch[dataset.SOURCE].sentences_words_ids[0] if i)
+                gold_coda = "".join(
+                    dataset.data[dataset.TARGET].words_map[i] for i in targets[0] if i)
+                system_coda = "".join(dataset.data[dataset.TARGET].words_map[i]
+                                      for i in predictions[0] if i != GumarDataset.Factor.EOW)
+                status = ", ".join([*["{}={:.4f}".format(name, value) for name, value in metrics.items()],
+                                    "{} {} {}".format(raw, gold_coda, system_coda)])
+                print("Step {}:".format(iteration), status)
+
+                with self.writer.as_default():
+                    for name, value in metrics.items():
+                        tf.summary.scalar("train/{}".format(name), value)
+                    tf.summary.text("train/prediction", status)
+
+    @tf.function(experimental_relax_shapes=True)
+    def predict_batch(self, sentences_chars):
+        return self.spelling_corrector(sentences_chars)
+
+    def evaluate(self, dataset, dataset_name, args):
+        correct_coda_forms, total_coda_forms = 0, 0
+        for batch in dataset.batches(args.batch_size):
+            predictions = self.predict_batch(
+                batch[dataset.SOURCE].sentences_words_ids).numpy()
+
+            # Compute whole coda accuracy
+            targets = self.append_eow(
+                batch[dataset.TARGET].sentences_words_ids)
+            resized_predictions = np.concatenate(
+                [predictions, np.zeros_like(targets)], axis=1)[:, :targets.shape[2]]
+            valid_coda_forms = targets[:, 0] != GumarDataset.Factor.EOW
+
+            total_coda_forms += np.sum(valid_coda_forms)
+            correct_coda_forms += np.sum(valid_coda_forms * np.all(targets ==
+                                                                   resized_predictions * (targets != 0), axis=1))
+
+        metrics = {"coda_accuracy": correct_coda_forms / total_coda_forms}
+        with self.writer.as_default():
+            tf.summary.experimental.set_step(
+                self.spelling_corrector.optimizer.iterations)
+            for name, value in metrics.items():
+                tf.summary.scalar("{}/{}".format(dataset_name, name), value)
+
+        return metrics
+
+    def train(self, gumar, args):
+        for epoch in range(args.epochs):
+            self.train_epoch(gumar.train, args)
+            # metrics = self.evaluate(gumar.dev, "dev", args)
+            print("Evaluation on {}, epoch {}: {}".format(
+                "dev", epoch + 1, metrics))
+
+    def predict(self, dataset, args):
+        predictions = []
+        for batch in dataset.batches(args.batch_size):
+            prediction_batch = self.predict_batch(
+                batch[dataset.SOURCE].sentences_words_ids).numpy().tolist()
+            for sentence in prediction_batch:
+                predictions.append(sentence)
+        return predictions
+
+
+if __name__ == "__main__":
+    # Parse arguments
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--batch_size", default=16,
+                        type=int, help="Batch size.")
+    parser.add_argument("--cle_dim", default=64, type=int,
+                        help="CLE embedding dimension.")
+    parser.add_argument("--epochs", default=10, type=int,
+                        help="Number of epochs.")
+    parser.add_argument("--max_sentences", default=5000,
+                        type=int, help="Maximum number of sentences to load.")
+    parser.add_argument("--rnn_dim", default=64, type=int,
+                        help="RNN cell dimension.")
+    parser.add_argument("--cell", default='gru', type=str,
+                        help="RNN cell type.")
+    parser.add_argument("--seed", default=42, type=int, help="Random seed.")
+    parser.add_argument("--threads", default=1, type=int,
+                        help="Maximum number of threads to use.")
+    parser.add_argument("--verbose", default=False,
+                        action="store_true", help="Verbose TF logging.")
+    args = parser.parse_args([] if "__file__" not in globals() else None)
+
+    # Fix random seeds and threads
+    np.random.seed(args.seed)
+    tf.random.set_seed(args.seed)
+    tf.config.threading.set_inter_op_parallelism_threads(args.threads)
+    tf.config.threading.set_intra_op_parallelism_threads(args.threads)
+
+    # Report only errors by default
+    if not args.verbose:
+        os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+
+    # Create logdir name
+    args.logdir = os.path.join("logs", "{}-{}-{}".format(
+        os.path.basename(globals().get("__file__", "notebook")),
+        datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S"),
+        ",".join(("{}={}".format(re.sub(
+            "(.)[^_]*_?", r"\1", key), value) for key, value in sorted(vars(args).items())))
+    ))
+
+    if os.path.exists('data/gumar'):
+        with open('data/gumar', 'rb') as g:
+            gumar = pickle.load(g)
+    else:
+        gumar = GumarDataset('annotated-gumar-corpus')
+        with open('data/gumar', 'wb') as g:
+            pickle.dump(gumar, g)
+
+    # Create the network and train
+    network = Network(args,
+                      src_chars_vocab_len=len(
+                          gumar.train.data[gumar.train.SOURCE].words_map),
+                      tgt_chars_vocab_len=len(gumar.train.data[gumar.train.TARGET].words_map))
+
+    for epoch in range(args.epochs):
+        network.train_epoch(gumar.train, args)
+        metrics = network.evaluate(gumar.dev, "dev", args)
+        print("Evaluation on {}, epoch {}: {}".format("dev", epoch + 1, metrics))
+
+    metrics = network.evaluate(gumar.test, "test", args)
+    with open("spelling_corrector.out", "w") as out_file:
+        print("{:.2f}".format(100 * metrics["coda_accuracy"]), file=out_file)
