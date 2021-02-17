@@ -211,6 +211,13 @@ class GumarDataset:
         def size(self):
             return self._size
 
+
+        def get_token_num(self):
+            return sum(len(s) for s in self._data[self.SOURCE].sentences_words_ids), \
+                   sum(len(s) for s in self._data[self.TARGET].sentences_words_ids), \
+                   sum(len(s) for s in self._data[self.SOURCE].sentences_chars_ids), \
+                   sum(len(s) for s in self._data[self.TARGET].sentences_words_ids)
+
         def batches(self, size=None):
             permutation = self._shuffler.permutation(
                 self._size) if self._shuffler else np.arange(self._size)
@@ -453,6 +460,20 @@ if __name__ == "__main__":
     #     pickle.dump(gumar, g)
     with open('data/gumar', 'rb') as g:
         gumar = pickle.load(g)
-        tokens = [token for sent in gumar.train.data[1].sentences_words for token in sent]
-        tokens_fl = Counter(tokens).most_common()
+        token_pairs_fl = Counter()
+        sentences_src, sentences_tgt = [], []
+        for idx in range(gumar.train.size):
+            sentences_src.append([])
+            sentences_tgt.append([])
+            for i, token_pair in enumerate(zip(gumar.train.data[0].sentences_words[idx], gumar.train.data[1].sentences_words[idx])):
+                if token_pairs_fl[token_pair] < 100:
+                    sentences_src[-1].append(
+                        gumar.train.data[0].sentences_chars_ids[idx][i])
+                    sentences_tgt[-1].append(
+                        gumar.train.data[1].sentences_chars_ids[idx][i])
+                token_pairs_fl.update([token_pair])
+            
+        # token_pairs = [token_pair for s in range(
+        #     gumar.train.size) for token_pair in zip(gumar.train.data[0].sentences_words[s], gumar.train.data[1].sentences_words[s])]
+        # tokens_pairs_fl1 = Counter(token_pairs).most_common()
         pass

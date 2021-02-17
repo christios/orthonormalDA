@@ -4,14 +4,14 @@ import tensorflow_addons as tfa
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 
-import unicodedata
 import re
 import numpy as np
 import os
-import io
 import time
 import pickle
 import argparse
+from random import randint
+from collections import Counter
 
 from gumar_dataset import GumarDataset
 
@@ -30,10 +30,12 @@ class Network:
                                                    return_sequences=True,
                                                    return_state=True,
                                                    recurrent_initializer='glorot_uniform')
+            self.bi_layer = tf.keras.layers.Bidirectional(
+                layer=self.lstm_layer, merge_mode='sum')
 
         def call(self, x, hidden):
             x = self.embedding(x)
-            output, h, c = self.lstm_layer(x, initial_state=hidden)
+            output, h, c = self.bi_layer(x, initial_state=hidden)
             return output, h, c
 
         def initialize_hidden_state(self):
@@ -146,8 +148,14 @@ class Network:
                                        max_length_output=max_length_output,
                                        attention_type='luong')
 
-        self.steps_per_epoch = dataset_len // args.batch_size
+        self.encoder.build((args.batch_size, max_length_input))
+        self.decoder.build(30)
+        self.decoder.summary()
+        
+        self.steps_per_epoch_train = dataset_len[0] // args.batch_size
+        self.steps_per_epoch_dev = dataset_len[1] // args.batch_size
         self.optimizer = tf.keras.optimizers.Adam()
+
 
     def loss_function(self, real, pred):
         # real shape = (BATCH_SIZE, max_length_output)
@@ -161,6 +169,7 @@ class Network:
         loss = mask * loss
         loss = tf.reduce_mean(loss)
         return loss
+
 
     @tf.function
     def train_step(self, inp, targ, enc_hidden):
@@ -183,32 +192,82 @@ class Network:
         self.optimizer.apply_gradients(zip(gradients, variables))
         return loss
 
+
     def train_epoch(self, dataset, args):
         for epoch in range(args.epochs):
             start = time.time()
             enc_hidden = self.encoder.initialize_hidden_state()
             total_loss = 0
-            # print(enc_hidden[0].shape, enc_hidden[1].shape)
-            progbar = tf.keras.utils.Progbar(self.steps_per_epoch)
-            for i, batch in enumerate(dataset.tf_data.take(self.steps_per_epoch)):
+            # progbar = tf.keras.utils.Progbar(self.steps_per_epoch)
+            print(f'\nEpoch {epoch+1}/{args.epochs}')
+            for i, batch in enumerate(dataset.tf_data.take(self.steps_per_epoch_train)):
                 source, target = batch[0], batch[1]
                 batch_loss = self.train_step(source, target, enc_hidden)
                 total_loss += batch_loss
                 iteration = int(self.optimizer.iterations)
-                progbar.update(i + 1)
-                if iteration % 10 == 0:
-                    print('Epoch {} Step {} Loss {:.4f}'.format(epoch + 1,
-                                                                iteration,
-                                                                batch_loss.numpy()))
+                # progbar.update(i + 1)
+                if iteration % 100 == 0:
+                    rand_word = randint(0, args.batch_size - 1)
+                    predictions = self.predict_batch(source[rand_word:rand_word+1])
+                    raw = "".join(dataset.data[dataset.SOURCE].chars_map[i]
+                                for i in source.numpy()[rand_word] if i)[5:-5]
+                    gold_coda = "".join(
+                        dataset.data[dataset.TARGET].chars_map[i] for i in target.numpy()[rand_word] if i)[5:-5]
+                    system_coda = "".join(dataset.data[dataset.TARGET].chars_map[i]
+                                        for i in predictions[0] if i != GumarDataset.Factor.EOW)
+                    status = "{}{}{}".format(f'<r>{raw}<r>'.rjust(25), f'<g>{gold_coda}<g>'.rjust(25), f'<s>{system_coda}<s>'.rjust(25))
+                    print(f'Batch {i+1}/{self.steps_per_epoch_train}\t| Loss {batch_loss.numpy():.4f} {status}')
+            metrics = self.evaluate(gumar.dev, 'dev', args)
+            print(f"Train. Loss {total_loss / self.steps_per_epoch_train:.4f} | Val. Accuracy: {metrics['coda_accuracy']:.4f}")
 
-            print('Epoch {} Loss {:.4f}'.format(epoch + 1,
-                                                total_loss / int(self.optimizer.iterations)))
-            print('Time taken for 1 epoch {} sec\n'.format(time.time() - start))
+
+    def predict_batch(self, sentences):
+        batch_size = sentences.shape[0]
+        enc_start_state = [tf.zeros((batch_size, self.encoder.enc_units)),
+                           tf.zeros((batch_size, self.encoder.enc_units))]
+        enc_out, enc_h, enc_c = self.encoder(sentences, enc_start_state)
+
+        start_tokens = tf.fill([batch_size], GumarDataset.Factor.BOS)
+        end_token = GumarDataset.Factor.EOS
+
+        greedy_sampler = tfa.seq2seq.GreedyEmbeddingSampler()
+        # Instantiate BasicDecoder object
+        decoder_instance = tfa.seq2seq.BasicDecoder(
+            cell=self.decoder.rnn_cell, sampler=greedy_sampler, output_layer=self.decoder.fc)
+        # Setup Memory in decoder stack
+        self.decoder.attention_mechanism.setup_memory(enc_out)
+
+        decoder_initial_state = self.decoder.build_initial_state(
+            batch_size, [enc_h, enc_c], tf.float32)
+        ### Since the BasicDecoder wraps around Decoder's rnn cell only, you have to ensure that the inputs to BasicDecoder
+        ### decoding step is output of embedding layer. tfa.seq2seq.GreedyEmbeddingSampler() takes care of this.
+        ### You only need to get the weights of embedding layer and pass this callable to BasicDecoder's call() function
+        decoder_embedding_matrix = self.decoder.embedding.variables[0]
+        outputs, _, _ = decoder_instance(decoder_embedding_matrix, start_tokens=start_tokens,
+                                        end_token=end_token, initial_state=decoder_initial_state)
+        return outputs.sample_id.numpy()
+
+    def evaluate(self, dataset, dataset_name, args):
+        correct_coda_forms, total_coda_forms = 0, 0
+        for i, batch in enumerate(dataset.tf_data.take(self.steps_per_epoch_dev)):
+            source, target = batch[0], batch[1].numpy()[:, 1:]
+            target[target == 3] = 0
+            predictions = self.predict_batch(source)
+            # Compute whole coda accuracy
+            resized_predictions = np.concatenate(
+                [predictions, np.zeros_like(target)], axis=1)[:, :target.shape[1]]
+            resized_predictions[resized_predictions == 3] = 0
+            total_coda_forms += target.shape[0]
+            correct_coda_forms += np.sum(np.all(target == resized_predictions * (
+                target != GumarDataset.Factor.PAD), axis=1))
+
+        metrics = {"coda_accuracy": correct_coda_forms / total_coda_forms}
+        return metrics
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--batch_size", default=,
+    parser.add_argument("--batch_size", default=16,
                         type=int, help="Batch size.")
     parser.add_argument("--buffer_size", default=32000,
                         type=int, help="tf.Dataset buffer size.")
@@ -236,35 +295,69 @@ if __name__ == "__main__":
     tf.config.threading.set_inter_op_parallelism_threads(args.threads)
     tf.config.threading.set_intra_op_parallelism_threads(args.threads)
 
-    if os.path.exists('data/gumar'):
-        with open('data/gumar', 'rb') as g:
+    if os.path.exists('data/gumar_char'):
+        with open('data/gumar_char', 'rb') as g:
             gumar = pickle.load(g)
+            print("Length of dataset before capping sentence length:", len(
+                gumar.train.data[gumar.Dataset.SOURCE].sentences_chars_ids))
+            temp = []
+            for i in range(len(gumar.train.data[0].sentences_chars_ids)):
+                if len(gumar.train.data[0].sentences_chars_ids[i]) < 30 and \
+                    len(gumar.train.data[1].sentences_chars_ids[i]) < 30:
+                    temp.append(
+                        (gumar.train.data[0].sentences_chars_ids[i], gumar.train.data[1].sentences_chars_ids[i]))
+            gumar.train.data[0].sentences_chars_ids = [c[0] for c in temp]
+            gumar.train.data[1].sentences_chars_ids = [c[1] for c in temp]
+            print("Length of dataset after capping sentence length to 30:", len(
+                gumar.train.data[gumar.Dataset.SOURCE].sentences_chars_ids))
+            token_pairs_fl = Counter()
+            words_src, words_tgt = [], []
+            src_sentences_chars = [''.join(map(lambda x: gumar.train.data[gumar.train.SOURCE].chars_map[x], word))
+                               for word in gumar.train.data[0].sentences_chars_ids]
+            tgt_sentences_chars = [''.join(map(lambda x: gumar.train.data[gumar.train.TARGET].chars_map[x], word))
+                                   for word in gumar.train.data[1].sentences_chars_ids]
+            for i, token_pair in enumerate(zip(src_sentences_chars, tgt_sentences_chars)):
+                if token_pair[0] != token_pair[1]:
+                    words_src.append(
+                        gumar.train.data[0].sentences_chars_ids[i])
+                    words_tgt.append(
+                        gumar.train.data[1].sentences_chars_ids[i])
+                token_pairs_fl.update([token_pair])
+            gumar.train._data[0].sentences_chars_ids = words_src
+            gumar.train._data[1].sentences_chars_ids = words_tgt
+            print(len(
+                gumar.train.data[gumar.Dataset.SOURCE].sentences_chars_ids))
+
     else:
         gumar = GumarDataset('annotated-gumar-corpus', add_bow_eow=True, max_sentence_len=20)
         with open('data/gumar', 'wb') as g:
             pickle.dump(gumar, g)
 
-    for f in range(GumarDataset.Dataset.FACTORS):
-        gumar.train.data[f].sentences_words_ids = tf.keras.preprocessing.sequence.pad_sequences(
-            gumar.train.data[f].sentences_words_ids, padding='post')
+    for dataset in [gumar.train, gumar.dev]:
+        for f in range(GumarDataset.Dataset.FACTORS):
+            dataset.data[f].sentences_chars_ids = tf.keras.preprocessing.sequence.pad_sequences(
+                dataset.data[f].sentences_chars_ids, padding='post')
 
-    train_src = gumar.train.data[GumarDataset.Dataset.SOURCE].sentences_words_ids
-    train_tgt = gumar.train.data[GumarDataset.Dataset.TARGET].sentences_words_ids
-    gumar.train.tf_data = tf.data.Dataset.from_tensor_slices(
-        (train_src, train_tgt))
-    gumar.train.tf_data = gumar.train.tf_data.shuffle(
+    train_src = gumar.train.data[GumarDataset.Dataset.SOURCE].sentences_chars_ids
+    train_tgt = gumar.train.data[GumarDataset.Dataset.TARGET].sentences_chars_ids
+    dev_src = gumar.dev.data[GumarDataset.Dataset.SOURCE].sentences_chars_ids[:1000]
+    dev_tgt = gumar.dev.data[GumarDataset.Dataset.TARGET].sentences_chars_ids[:1000]
+    gumar.train.tf_data = tf.data.Dataset.from_tensor_slices((train_src, train_tgt)).shuffle(
+        args.buffer_size).batch(args.batch_size, drop_remainder=True)
+    gumar.dev.tf_data = tf.data.Dataset.from_tensor_slices((dev_src, dev_tgt)).shuffle(
         args.buffer_size).batch(args.batch_size, drop_remainder=True)
 
     network = Network(args,
-                      dataset_len=gumar.train.size,
+                      dataset_len=(len(gumar.train.data[gumar.Dataset.SOURCE].sentences_chars_ids),
+                                   len(gumar.dev.data[gumar.Dataset.SOURCE].sentences_chars_ids[:100])),
                       src_words_vocab_len=len(
-                          gumar.train.data[gumar.train.SOURCE].words_map),
+                          gumar.train.data[gumar.train.SOURCE].chars_map),
                       tgt_words_vocab_len=len(
-                          gumar.train.data[gumar.train.TARGET].words_map),
+                          gumar.train.data[gumar.train.TARGET].chars_map),
                       max_length_input=max(
-                          len(s) for s in gumar.train.data[gumar.Dataset.SOURCE].sentences_words_ids),
+                          len(s) for s in gumar.train.data[gumar.Dataset.SOURCE].sentences_chars_ids),
                       max_length_output=max(
-                          len(s) for s in gumar.train.data[gumar.Dataset.TARGET].sentences_words_ids))
+                          len(s) for s in gumar.train.data[gumar.Dataset.TARGET].sentences_chars_ids))
 
     for epoch in range(args.epochs):
         network.train_epoch(gumar.train, args)

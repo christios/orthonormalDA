@@ -6,6 +6,8 @@ import os
 import datetime
 import argparse
 import pickle
+from collections import Counter
+from random import randint
 
 from gumar_dataset import GumarDataset
 
@@ -254,17 +256,19 @@ class Network:
                 tf.summary.experimental.set_step(iteration)
                 metrics = dict(zip(self.spelling_corrector.metrics_names, metrics))
 
+                rand_sent = randint(0, args.batch_size)
+                rand_word = randint(0, batch[dataset.SOURCE].sentences_chars_ids[rand_sent].shape[0])
                 predictions = self.predict_batch(
-                    batch[dataset.SOURCE].sentences_chars_ids[:1]).numpy()
-
+                    batch[dataset.SOURCE].sentences_chars_ids[rand_sent]).numpy()
+                
                 raw = "".join(dataset.data[dataset.SOURCE].chars_map[i]
-                               for i in batch[dataset.SOURCE].sentences_chars_ids[0, 0] if i)
+                               for i in batch[dataset.SOURCE].sentences_chars_ids[rand_sent, rand_word] if i)
                 gold_coda = "".join(
-                    dataset.data[dataset.TARGET].chars_map[i] for i in targets[0, 0] if i)
+                    dataset.data[dataset.TARGET].chars_map[i] for i in targets[rand_sent, rand_word] if i)
                 system_coda = "".join(dataset.data[dataset.TARGET].chars_map[i]
-                                       for i in predictions[0, 0] if i != GumarDataset.Factor.EOW)
+                                       for i in predictions[rand_sent, rand_word] if i != GumarDataset.Factor.EOW)
                 status = ", ".join([*["{}={:.4f}".format(name, value) for name, value in metrics.items()],
-                                    "{} {} {}".format(raw, gold_coda, system_coda)])
+                                    "{}{}{}".format(raw.rjust(25), gold_coda.rjust(25), system_coda.rjust(25))])
                 print("Step {}:".format(iteration), status)
                 
                 with self.writer.as_default():
@@ -368,6 +372,23 @@ if __name__ == "__main__":
         gumar = GumarDataset('annotated-gumar-corpus')
         with open('data/gumar', 'wb') as g:
             pickle.dump(gumar, g)
+
+    print(gumar.train.get_token_num())
+    token_pairs_fl = Counter()
+    sentences_src, sentences_tgt = [], []
+    for idx in range(gumar.train.size):
+        sentences_src.append([])
+        sentences_tgt.append([])
+        for i, token_pair in enumerate(zip(gumar.train.data[0].sentences_words[idx], gumar.train.data[1].sentences_words[idx])):
+            if token_pairs_fl[token_pair] < 100:
+                sentences_src[-1].append(
+                    gumar.train.data[0].sentences_chars_ids[idx][i])
+                sentences_tgt[-1].append(
+                    gumar.train.data[1].sentences_chars_ids[idx][i])
+            token_pairs_fl.update([token_pair])
+    gumar.train._data[0].sentences_chars_ids = sentences_src
+    gumar.train._data[1].sentences_chars_ids = sentences_tgt
+    print(gumar.train.get_token_num())
 
     # Create the network and train
     network = Network(args,

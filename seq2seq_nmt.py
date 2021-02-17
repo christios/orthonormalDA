@@ -385,38 +385,6 @@ def train_step(inp, targ, enc_hidden):
   return loss
 
 
-"""## Train the model"""
-
-EPOCHS = 10
-
-for epoch in range(EPOCHS):
-  start = time.time()
-
-  enc_hidden = encoder.initialize_hidden_state()
-  total_loss = 0
-  # print(enc_hidden[0].shape, enc_hidden[1].shape)
-  progbar = tf.keras.utils.Progbar(steps_per_epoch)
-  for (batch, (inp, targ)) in enumerate(train_dataset.take(steps_per_epoch)):
-    batch_loss = train_step(inp, targ, enc_hidden)
-    total_loss += batch_loss
-    progbar.update(batch+1)
-    if batch % 10 == 0:
-      print('Epoch {} Batch {} Loss {:.4f}'.format(epoch + 1,
-                                                   batch,
-                                                   batch_loss.numpy()))
-  # saving (checkpoint) the model every 2 epochs
-  if (epoch + 1) % 2 == 0:
-    checkpoint.save(file_prefix=checkpoint_prefix)
-
-  print('Epoch {} Loss {:.4f}'.format(epoch + 1,
-                                      total_loss / steps_per_epoch))
-  print('Time taken for 1 epoch {} sec\n'.format(time.time() - start))
-
-"""## Use tf-addons BasicDecoder for decoding
-
-"""
-
-
 def evaluate_sentence(sentence):
   sentence = dataset_creator.preprocess_sentence(sentence)
 
@@ -460,6 +428,41 @@ def evaluate_sentence(sentence):
   outputs, _, _ = decoder_instance(decoder_embedding_matrix, start_tokens=start_tokens,
                                    end_token=end_token, initial_state=decoder_initial_state)
   return outputs.sample_id.numpy()
+"""## Train the model"""
+
+EPOCHS = 10
+
+for epoch in range(EPOCHS):
+  start = time.time()
+
+  enc_hidden = encoder.initialize_hidden_state()
+  total_loss = 0
+  # print(enc_hidden[0].shape, enc_hidden[1].shape)
+  # progbar = tf.keras.utils.Progbar(steps_per_epoch)
+  for (batch, (inp, targ)) in enumerate(train_dataset.take(steps_per_epoch)):
+    batch_loss = train_step(inp, targ, enc_hidden)
+    total_loss += batch_loss
+    # progbar.update(batch+1)
+    if batch % 10 == 0:
+      print()
+      print(evaluate_sentence(u'hace mucho frio aqui.'))
+      print('Epoch {} Batch {} Loss {:.4f}'.format(epoch + 1,
+                                                   batch,
+                                                   batch_loss.numpy()))
+  # saving (checkpoint) the model every 2 epochs
+  if (epoch + 1) % 2 == 0:
+    checkpoint.save(file_prefix=checkpoint_prefix)
+
+  print('Epoch {} Loss {:.4f}'.format(epoch + 1,
+                                      total_loss / steps_per_epoch))
+  print('Time taken for 1 epoch {} sec\n'.format(time.time() - start))
+
+"""## Use tf-addons BasicDecoder for decoding
+
+"""
+
+
+
 
 
 def translate(sentence):
