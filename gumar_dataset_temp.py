@@ -1,5 +1,6 @@
 import os
 import zipfile
+from torch.utils.data.dataset import Dataset
 from tqdm import tqdm
 import xml.etree.ElementTree as ET
 import re
@@ -12,6 +13,8 @@ import numpy as np
 import pyarabic.araby as araby
 from edit_distance import SequenceMatcher
 from nltk import edit_distance, masi_distance
+
+from torch import zeros, long, tensor
 
 ALEFAT = araby.ALEFAT[:5] + tuple(araby.ALEFAT[-1])
 ALEFAT_PATTERN = re.compile(u"[" + u"".join(ALEFAT) + u"]", re.UNICODE)
@@ -71,8 +74,8 @@ class GumarDataset:
 
     class FactorBatch:
         def __init__(self,
-                     sentences_words_ids: List[np.ndarray],
-                     sentences_chars_ids: List[np.ndarray] = None) -> None:
+                     sentences_words_ids: tensor,
+                     sentences_chars_ids: tensor = None) -> None:
 
             self.sentences_words_ids = sentences_words_ids
             self.sentences_chars_ids = sentences_chars_ids
@@ -108,8 +111,9 @@ class GumarDataset:
             for f in range(self.FACTORS):
                 self._data.append(GumarDataset.Factor(f in [self.SOURCE, self.TARGET]))
 
+            print(f'Loading {name}...')
             data_xml = ET.parse(data_file).getroot()
-            for idx, sentence in tqdm(enumerate(data_xml)):
+            for idx, sentence in enumerate(tqdm(data_xml)):
                 if idx in GumarDataset.Dataset.EXCLUSIONS[name.lower()]:
                     continue
                 src_temp = sentence[0].text
@@ -122,24 +126,24 @@ class GumarDataset:
                 tgt_temp = tgt_temp.split(' ')
                 tgt_temp = [token for token in tgt_temp if token]
 
-                # Drop different-length and empty sentences
+                # Drop empty sentences
                 if not (src_temp and tgt_temp):
                     continue
-                # Align src and tgt or discard example
-                try:
-                    src_temp = [[token, 'n'] for token in src_temp]
-                    tgt_temp = [[token, 'n'] for token in tgt_temp]
-                    src, tgt = GumarDataset.align(src_temp, tgt_temp)
-                except:
-                    GumarDataset.Dataset.EXCLUSIONS[name].append(idx)
-                    continue
+                # # Align src and tgt or discard example
+                # try:
+                #     src_temp = [[token, 'n'] for token in src_temp]
+                #     tgt_temp = [[token, 'n'] for token in tgt_temp]
+                #     src, tgt = GumarDataset.align(src_temp, tgt_temp)
+                # except:
+                #     GumarDataset.Dataset.EXCLUSIONS[name].append(idx)
+                #     continue
                 
-                check_src = (' '.join([s[0] for s in src_temp]), ' '.join(src))
-                check_tgt = (' '.join([t[0] for t in tgt_temp]), ' '.join(tgt))
-                if check_src[0] != check_src[1] or check_tgt[0] != check_tgt[1]:
-                    continue
-
-                if max_sentence_len and len(src) > max_sentence_len:
+                # check_src = (' '.join([s[0] for s in src_temp]), ' '.join(src))
+                # check_tgt = (' '.join([t[0] for t in tgt_temp]), ' '.join(tgt))
+                # if check_src[0] != check_src[1] or check_tgt[0] != check_tgt[1]:
+                #     continue
+                src, tgt = src_temp, tgt_temp
+                if max_sentence_len and (len(src) > max_sentence_len or len(tgt) > max_sentence_len):
                     continue
 
                 for f in range(self.FACTORS):
@@ -161,8 +165,9 @@ class GumarDataset:
                     sentence = tgt if f else src
                     # Word-level information
                     for word in sentence:
-                        factor.words_vocab[word] = len(factor.words_map)
-                        factor.words_map.append(word)
+                        if word not in factor.words_vocab:
+                            factor.words_vocab[word] = len(factor.words_map)
+                            factor.words_map.append(word)
                         factor.sentences_words_ids[-1].append(factor.words_vocab[word])
                         factor.sentences_words[-1].append(word)
 
@@ -176,9 +181,9 @@ class GumarDataset:
                                 factor.sentences_chars[-1][-1].append(
                                     factor.chars_map[GumarDataset.Factor.BOW])
                             for c in word:
-                                factor.chars_vocab[c] = len(
-                                    factor.chars_map)
-                                factor.chars_map.append(c)
+                                if c not in factor.chars_vocab:
+                                    factor.chars_vocab[c] = len(factor.chars_map)
+                                    factor.chars_map.append(c)
                                 factor.sentences_chars[-1][-1].append(c)
                                 factor.sentences_chars_ids[-1][-1].append(
                                     factor.chars_vocab[c])
@@ -198,6 +203,13 @@ class GumarDataset:
         @property
         def data(self):
             return self._data
+        
+        @property
+        def data_words_chars(self):
+            return list(zip(self._data[0].sentences_words_ids, \
+                            self._data[1].sentences_words_ids, \
+                            self._data[0].sentences_chars_ids, \
+                            self._data[1].sentences_chars_ids))
 
         @property
         def size(self):
@@ -209,6 +221,48 @@ class GumarDataset:
                    sum(len(s) for s in self._data[self.TARGET].sentences_words_ids), \
                    sum(len(s) for s in self._data[self.SOURCE].sentences_chars_ids), \
                    sum(len(s) for s in self._data[self.TARGET].sentences_words_ids)
+
+        
+        @staticmethod
+        def generate_batch(data_batch):
+            batch_size = len(data_batch)
+            batch_perm = range(batch_size)
+            batch: List[GumarDataset.FactorBatch] = []
+            lengths = [[], []]
+
+            # Word-level data
+            data_batch_words = []
+            for f in range(GumarDataset.Dataset.FACTORS):
+                data_batch_words.append([example[f] for example in data_batch])
+            for f, factor in enumerate(data_batch_words):
+                max_sentence_len = max(len(data_batch[i][f]) for i in batch_perm)
+                batch.append(GumarDataset.FactorBatch(
+                    zeros([batch_size, max_sentence_len], dtype=long)))
+                for i in range(batch_size):
+                    batch[-1].sentences_words_ids[i, :len(factor[i])] = tensor(factor[i], dtype=long)
+                    lengths[f].append(factor[i].size)
+
+            # Character-level data
+            data_batch_chars = []
+            for f in range(2, GumarDataset.Dataset.FACTORS + 2):
+                data_batch_chars.append([example[f] for example in data_batch])
+            for f, factor in enumerate(data_batch_chars):
+                max_word_len = max(
+                    len(word_chars) for i in batch_perm for word_chars in factor[i])
+
+                batch[f].sentences_chars_ids = zeros(
+                    [batch_size, max_sentence_len, max_word_len], dtype=long)
+                for i in range(batch_size):
+                    for j, sentence_chars in enumerate(factor[i]):
+                        batch[f].sentences_chars_ids[i, j, :len(
+                            sentence_chars)] = tensor(sentence_chars, dtype=long)
+                
+
+            return batch[0].sentences_words_ids.permute(1, 0), \
+                   batch[1].sentences_words_ids.permute(1, 0), \
+                   batch[0].sentences_chars_ids.permute(1, 0, 2), \
+                   batch[1].sentences_chars_ids.permute(1, 0, 2), \
+                   lengths
 
 
     @staticmethod
