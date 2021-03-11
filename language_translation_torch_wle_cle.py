@@ -35,7 +35,8 @@ class Encoder(nn.Module):
                  emb_dim: int,
                  enc_hid_dim: int,
                  dec_hid_dim: int,
-                 dropout: float):
+                 dropout: float,
+                 rnn_layers: bool):
         super().__init__()
 
         self.input_dim = input_dim
@@ -43,34 +44,40 @@ class Encoder(nn.Module):
         self.enc_hid_dim = enc_hid_dim
         self.dec_hid_dim = dec_hid_dim
         self.dropout = dropout
+        self.rnn_layers = rnn_layers
 
         self.embedding = nn.Embedding(input_dim, emb_dim)
-        self.rnn = nn.GRU(emb_dim, enc_hid_dim, bidirectional=True)
+        self.rnn = nn.GRU(emb_dim, enc_hid_dim, bidirectional=True, num_layers=2 if rnn_layers else 1)
         self.fc = nn.Linear(enc_hid_dim * 2, dec_hid_dim)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self,
-                src: Tensor,
-                lengths) -> Tuple[Tensor]:
+                src_w: Tensor,
+                src_c: Tensor,
+                lengths_w) -> Tuple[Tensor]:
         """- src: [src_len, batch_size]
            - 2 is the number of directions (forward/backward)"""
         # embedded = [src_len, batch_size, we_dim]
-        embedded = self.dropout(self.embedding(src))
-        if lengths:
-            embedded = pack_padded_sequence(embedded, lengths, enforce_sorted=False)
+        embedded_w = self.dropout(self.embedding(src_w))
+        if lengths_w:
+            embedded_w = pack_padded_sequence(embedded_w, lengths_w, enforce_sorted=False)
         # outputs: [src_len, batch_size, 2*rnn_dim] final-layer hidden states
         # hidden: [2*rnn_layers, batch_size, rnn_dim] is the final hidden state of each layer-direction
         # hidden: [forward_1, backward_1, forward_2, backward_2, ...]
-        outputs, hidden = self.rnn(embedded)
-        if lengths:
-            outputs, _ = pad_packed_sequence(outputs)
+        outputs_w, hidden_w = self.rnn(embedded_w)
+        if lengths_w:
+            outputs_w, _ = pad_packed_sequence(outputs_w)
+        
+        forward_w = (hidden_w[0, :, :] + hidden_w[2, :, :]) if self.rnn_layers else hidden_w[0, :, :]
+        backward_w = (hidden_w[1, :, :] + hidden_w[3, :, :]) if self.rnn_layers else hidden_w[1, :, :]
+
         # hidden[-2, :, :]: [1, batch_size, rnn_dim]
         # backward_forward: [batch_size, rnn_dim * 2]
-        backward_forward = torch.cat((hidden[-2, :, :], hidden[-1, :, :]), dim=1)
-        hidden = torch.tanh(self.fc(backward_forward))
+        backward_forward_w = torch.cat((forward_w, backward_w), dim=1)
+        hidden_w = torch.tanh(self.fc(backward_forward_w))
         #outputs = [src_len, batch_size, rnn_dim * 2] because 2 directions
         #hidden = [batch_size, rnn_dim]
-        return outputs, hidden
+        return outputs_w, hidden_w
 
 
 class Attention(nn.Module):
@@ -190,30 +197,32 @@ class Seq2Seq(nn.Module):
         self.device = device
 
     def forward(self,
-                src: Tensor,
-                tgt: Tensor,
+                src_w: Tensor,
+                tgt_w: Tensor,
+                src_c: Tensor,
+                tgt_c: Tensor,
                 lengths=None,
                 teacher_forcing_ratio: float = 0.5) -> Tensor:
         """- src = [src_len, batch_size]
            - tgt = [tgt_len, batch_size]
            - teacher_forcing_ratio is probability to use teacher forcing
              e.g. if teacher_forcing_ratio is 0.75 we use teacher forcing 75% of the time"""
-        batch_size = src.shape[1]
-        max_len = tgt.shape[0]
+        batch_size = src_w.shape[1]
+        max_len = tgt_w.shape[0]
         tgt_vocab_size = self.decoder.output_dim
 
         outputs = torch.zeros(max_len, batch_size,
                               tgt_vocab_size).to(self.device)
-        encoder_outputs, hidden = self.encoder(src, lengths[0] if lengths else lengths)
+        encoder_outputs, hidden = self.encoder(src_w, src_c, lengths[0] if lengths else lengths)
         # first input to the decoder is the <sos> token
-        output = tgt[0, :]
+        output = tgt_w[0, :]
         for t in range(1, max_len):
             # output = [batch_size, tgt_vocab]
             output, hidden = self.decoder(output, hidden, encoder_outputs)
             outputs[t] = output
             teacher_force = random.random() < teacher_forcing_ratio
             top1 = output.max(1)[1]
-            output = (tgt[t] if teacher_force else top1)
+            output = (tgt_w[t] if teacher_force else top1)
 
         return outputs
 
@@ -243,8 +252,9 @@ def train(model: nn.Module,
     epoch_loss = 0
     for iteration, (src_w, tgt_w, src_c, tgt_c, lengths) in enumerate(iterator):
         src_w, tgt_w = src_w.to(device), tgt_w.to(device)
+        src_c, tgt_c = src_c.to(device), tgt_c.to(device)
         optimizer.zero_grad()
-        output = model(src_w, tgt_w, lengths)
+        output = model(src_w, tgt_w, src_c, tgt_c, lengths)
         output = output[1:].view(-1, output.shape[-1])
         tgt_lst = tgt_w[1:].contiguous().view(-1)
         loss = criterion(output, tgt_lst)
@@ -275,7 +285,7 @@ def evaluate(model: nn.Module,
             epoch_loss += loss.item()
 
             # Accuracy
-            predictions = model(src_w, tgt_w, teacher_forcing_ratio=0).permute(
+            predictions = model(src_w, tgt_w, ..., ..., teacher_forcing_ratio=0).permute(
                 1, 0, 2).argmax(2)[:, 1:]
             tgt_w = tgt_w.permute(1, 0)[:, 1:]
             tgt_w[tgt_w == GumarDataset.Factor.EOW] = 0
@@ -291,7 +301,7 @@ def evaluate(model: nn.Module,
 
 
 def predict_batch(src, tgt):
-    output = model(src, tgt, teacher_forcing_ratio=0)  # turn off teacher forcing
+    output = model(src, tgt, ..., ..., teacher_forcing_ratio=0)  # turn off teacher forcing
     output = output[1:].view(-1, output.shape[-1])
     return output
 
@@ -421,6 +431,8 @@ if __name__ == "__main__":
                         help="RNN cell dimension.")
     parser.add_argument("--cell", default='gru',
                         type=str, help="RNN cell type.")
+    parser.add_argument("--rnn_layers", default=False, action='store_true',
+                        help="Whether to include one or two RNN layers for the encoder.")
     parser.add_argument("--seed", default=42, type=int, help="Random seed.")
     args = parser.parse_args([] if "__file__" not in globals() else None)
 
@@ -436,7 +448,7 @@ if __name__ == "__main__":
     ENC_DROPOUT = 0.5
     DEC_DROPOUT = 0.5
 
-    enc = Encoder(INPUT_DIM, args.we_dim, args.rnn_dim, args.rnn_dim, ENC_DROPOUT)
+    enc = Encoder(INPUT_DIM, args.we_dim, args.rnn_dim, args.rnn_dim, ENC_DROPOUT, args.rnn_layers)
     attn = Attention(args.rnn_dim, args.rnn_dim, ATTN_DIM)
     dec = Decoder(OUTPUT_DIM, args.we_dim, args.rnn_dim,
                 args.rnn_dim, DEC_DROPOUT, attn)

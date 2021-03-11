@@ -432,11 +432,22 @@ class GumarDataset:
         with zipfile.ZipFile(path, "r") as zip_file:
             for dataset in ["TRAIN", "DEV", "TEST"]:
                 with zip_file.open(f"{os.path.splitext(path)[0]}/{dataset}_annotated_Gumar_corpus.xml", "r") as dataset_file:
-                    setattr(self, dataset.lower(), self.Dataset(dataset_file,
-                                                                add_bow_eow=add_bow_eow,
-                                                                max_sentences=max_sentences,
-                                                                max_sentence_len=max_sentence_len,
-                                                                name=dataset.lower()))
+                    # setattr(self, dataset.lower(), self.Dataset(dataset_file,
+                    #                                             add_bow_eow=add_bow_eow,
+                    #                                             max_sentences=max_sentences,
+                    #                                             max_sentence_len=max_sentence_len,
+                    #                                             name=dataset.lower()))
+                    inspect = []
+                    data_xml = ET.parse(dataset_file).getroot()
+                    for idx, ex in enumerate(data_xml):
+                        for token in ex[2]:
+                            enclitics = [bool(token.attrib.get(
+                                f'prc{i}_form')) for i in range(4)]
+                            if enclitics.count(True) > 1:
+                                inspect.append(idx)
+                                break
+                    pass
+
 
 
 if __name__ == "__main__":
