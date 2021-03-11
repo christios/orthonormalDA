@@ -1,12 +1,11 @@
 import os
 import zipfile
 from tqdm import tqdm
-import xml.etree.ElementTree as ET
 import re
 from typing import Dict, List, Optional, TextIO
 from math import inf
 from collections import Counter
-import pickle
+import xml.etree.ElementTree as ET
 
 import numpy as np
 import pyarabic.araby as araby
@@ -15,6 +14,7 @@ from nltk import edit_distance, masi_distance
 
 ALEFAT = araby.ALEFAT[:5] + tuple(araby.ALEFAT[-1])
 ALEFAT_PATTERN = re.compile(u"[" + u"".join(ALEFAT) + u"]", re.UNICODE)
+counter = Counter()
 
 
 class GumarDataset:
@@ -57,7 +57,8 @@ class GumarDataset:
 
             self.words_vocab = train.words_vocab if train else {
                 "<pad>": self.PAD, "<unk>": self.UNK, "<bos>": self.BOS, "<eos>": self.EOS}
-            self.words_map = train.words_map if train else ["<pad>", "<unk>", "<bos>", "<eos>"]
+            self.words_map = train.words_map if train else [
+                "<pad>", "<unk>", "<bos>", "<eos>"]
             self.sentences_words_ids = []
             self.sentences_words = []
             self.characters = characters
@@ -106,7 +107,14 @@ class GumarDataset:
                      max_sentence_len: int = 0,
                      seed: int = 42,
                      name: str = '') -> None:
-
+            """Dataset is assembled at the character level. Dictionaries and maps are
+            built, source-target pairs are aligned if necessary, empty sentences are 
+            discarded.
+            - train: after training set vocabulary has been built, dev and test make use of this
+            argument for the vocabulary
+            - max_sentences: maximum number of sentences to include
+            - max_sentence_len: maximum length of a sentence"""
+            self.not_included = {}
             # Create factors
             self._data = []
             for f in range(self.FACTORS):
@@ -114,7 +122,7 @@ class GumarDataset:
                     f in [self.SOURCE, self.TARGET], train._data[f] if train else None))
 
             data_xml = ET.parse(data_file).getroot()
-            for idx, sentence in tqdm(enumerate(data_xml)):
+            for idx, sentence in enumerate(tqdm(data_xml)):
                 if idx in GumarDataset.Dataset.EXCLUSIONS[name.lower()]:
                     continue
                 src_temp = sentence[0].text
@@ -138,10 +146,11 @@ class GumarDataset:
                 except:
                     GumarDataset.Dataset.EXCLUSIONS[name].append(idx)
                     continue
-                
+
                 check_src = (' '.join([s[0] for s in src_temp]), ' '.join(src))
                 check_tgt = (' '.join([t[0] for t in tgt_temp]), ' '.join(tgt))
                 if check_src[0] != check_src[1] or check_tgt[0] != check_tgt[1]:
+                    self.not_included[idx] = (check_src, check_tgt)
                     continue
 
                 if max_sentence_len and len(src) > max_sentence_len:
@@ -163,15 +172,6 @@ class GumarDataset:
                     sentence = tgt if f else src
                     # Word-level information
                     for word in sentence:
-                        if word not in factor.words_vocab:
-                            if train:
-                                word = "<unk>"
-                            else:
-                                factor.words_vocab[word] = len(factor.words_map)
-                                factor.words_map.append(word)
-                        factor.sentences_words_ids[-1].append(factor.words_vocab[word])
-                        factor.sentences_words[-1].append(word)
-
                         # Character-level information
                         if factor.characters:
                             factor.sentences_chars_ids.append([])
@@ -192,8 +192,10 @@ class GumarDataset:
                                 factor.sentences_chars_ids[-1].append(
                                     GumarDataset.Factor.EOW)
                     if add_bow_eow:
-                        factor.sentences_words_ids[-1].append(GumarDataset.Factor.EOS)
-                        factor.sentences_words[-1].append(factor.words_map[GumarDataset.Factor.EOS])
+                        factor.sentences_words_ids[-1].append(
+                            GumarDataset.Factor.EOS)
+                        factor.sentences_words[-1].append(
+                            factor.words_map[GumarDataset.Factor.EOS])
                 if max_sentences and len(self._data[self.SOURCE].sentences_words_ids) >= max_sentences:
                     break
 
@@ -209,17 +211,22 @@ class GumarDataset:
         def size(self):
             return self._size
 
-
         def get_token_num(self):
             return sum(len(s) for s in self._data[self.SOURCE].sentences_words_ids), \
-                   sum(len(s) for s in self._data[self.TARGET].sentences_words_ids), \
-                   sum(len(s) for s in self._data[self.SOURCE].sentences_chars_ids), \
-                   sum(len(s) for s in self._data[self.TARGET].sentences_chars_ids)
-
+                sum(len(s) for s in self._data[self.TARGET].sentences_words_ids), \
+                sum(len(s) for s in self._data[self.SOURCE].sentences_chars_ids), \
+                sum(len(s)
+                    for s in self._data[self.TARGET].sentences_chars_ids)
 
     @staticmethod
     def align_subsequences(src_sub, tgt_sub):
+        """Takes in the output of the sequence matcher. All sequences which lie between
+        contiguous 'equal' token-pair sequences will be subject to alignment"""
         def include_alignment():
+            """This function decides whether to perform alignment or not on a subsequence or
+            not. This is based on the output of the sequence matcher. All subsequences
+            between contiguous 'equal' pairs will be aligned.
+             """
             # If there are 'i' and 'd' tokens in addition to 's'
             if [True for t in src_sub[start:end] if t[1] != 's']:
                 src_sub_temp, tgt_sub_temp, alignment, flipped = GumarDataset.soft_align(
@@ -252,7 +259,6 @@ class GumarDataset:
                 tgt_temp.append(tgt_sub[i][0])
             elif start == -1 and op != 'e':
                 start = i
-            # RHS of OR is for when the
             elif start != -1 and op == 'e':
                 end = i
                 include_alignment()
@@ -314,17 +320,22 @@ class GumarDataset:
         src, tgt = GumarDataset.align_subsequences(src_temp, tgt_temp)
         return src, tgt
 
-
     @staticmethod
     def soft_align(tgt, src, start, end):
+        """This method takes in a source-target pair and aligns it based
+        not on the copus alignment frequencies and translation probabilities
+        but on an edit-distance based metric since we are dealing with a 
+        very noisy corpus."""
         src = [token[0] for token in src[start:end] if token[1] != 'd']
         tgt = [token[0] for token in tgt[start:end] if token[1] != 'i']
-        
+
+        counter.update([len(src)])
+
         flipped = False
         if len(tgt) < len(src):
             src, tgt = tgt, src
             flipped = True
-        
+
         I, J = len(tgt), len(src)
         alignment = []
         start = 0
@@ -358,9 +369,9 @@ class GumarDataset:
 
         return src, tgt, alignment, flipped
 
-
     @staticmethod
     def preprocess(sentence):
+        """Arabic-specific preprocessing"""
         sentence = araby.strip_tatweel(sentence)
         sentence = sentence.replace(
             araby.SMALL_ALEF+araby.ALEF_MAKSURA, araby.ALEF_MAKSURA)
@@ -391,51 +402,3 @@ class GumarDataset:
                                                                 max_sentences=max_sentences,
                                                                 max_sentence_len=max_sentence_len,
                                                                 name=dataset.lower()))
-
-
-# if __name__ == "__main__":
-    # if os.path.exists('alignments/useful_examples'):
-    #     with open('alignments/useful_examples', 'rb') as u:
-    #         useful_examples = pickle.load(u)
-    # else:
-    #     gumar = GumarDataset('annotated-gumar-corpus')
-    #     useful_examples = []
-    #     total_examples = 0
-    #     for idx in range(gumar.train.size):
-    #         src = gumar.train.data[0].word_strings[idx]
-    #         tgt = gumar.train.data[1].word_strings[idx]
-    #         total_examples += len(src)
-    #         for i in range(len(src)):
-    #             if src[i] != tgt[i]:
-    #                 useful_examples.append((src[i], tgt[i]))
-    #     with open('alignments/useful_examples', 'wb') as u:
-    #         pickle.dump(useful_examples, u)
-
-    # dubious = {}
-    # for i in range(5):
-    #     for ex in useful_examples:
-    #         if edit_distance(ex[0], ex[1]) == i:
-    #             dubious.setdefault(i, []).append(ex)
-    
-    # gumar = GumarDataset('annotated-gumar-corpus', add_bow_eow=True)
-    # with open('data/gumar_char', 'wb') as g:
-    #     pickle.dump(gumar, g)
-    # with open('data/gumar', 'rb') as g:
-    #     gumar = pickle.load(g)
-    #     token_pairs_fl = Counter()
-    #     sentences_src, sentences_tgt = [], []
-    #     for idx in range(gumar.train.size):
-    #         sentences_src.append([])
-    #         sentences_tgt.append([])
-    #         for i, token_pair in enumerate(zip(gumar.train.data[0].sentences_words[idx], gumar.train.data[1].sentences_words[idx])):
-    #             if token_pairs_fl[token_pair] < 100:
-    #                 sentences_src[-1].append(
-    #                     gumar.train.data[0].sentences_chars_ids[idx][i])
-    #                 sentences_tgt[-1].append(
-    #                     gumar.train.data[1].sentences_chars_ids[idx][i])
-    #             token_pairs_fl.update([token_pair])
-            
-        # token_pairs = [token_pair for s in range(
-        #     gumar.train.size) for token_pair in zip(gumar.train.data[0].sentences_words[s], gumar.train.data[1].sentences_words[s])]
-        # tokens_pairs_fl1 = Counter(token_pairs).most_common()
-        # pass
