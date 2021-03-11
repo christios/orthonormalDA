@@ -9,17 +9,17 @@ The model is implemented using PyTorch (version 1.7.1) with the following parame
 ## Usage
 
 ### Training
-    python3 spelling_standardizer.py
+    python3 spell_correct_cle_tf.py
 
 
 ### Predicting
 A file containing the predictions of our test set (`predictions.txt`) is already avaiable in this folder. Tokens enclosed in \<r> are the source tokens, \<g> are the gold tokens, and \<s> are the system tokens (our predictions). To reproduce these results, either retrain the model:
 
-    python3 spelling_standardizer.py --predict
+    python3 spell_correct_cle_tf.py --predict
 
 or load the pretrained model weights (`spelling_std.pt`) obtained by using the parameters mentioned in the above section:
 
-    python3 spelling_standardizer.py --predict --load spelling_std.pt
+    python3 spell_correct_cle_tf.py --predict --load spelling_std.pt
 
 
 ### Flags
