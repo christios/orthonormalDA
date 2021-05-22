@@ -10,7 +10,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 from spell_correct.vocab import Vocab
@@ -40,8 +39,6 @@ class SpellCorrectTrainer:
 
         self.src_to_tgt = np.vectorize(
             lambda x: self.vocab.tgt.char2id[self.vocab.src.id2char[x]])
-        self.evaluation = Evaluation(
-            already_split=False, eos_label=self.vocab.tgt['</s>'])
 
     
     @staticmethod
@@ -103,7 +100,6 @@ class SpellCorrectTrainer:
             start_time = time.time()
             for iteration, batch in enumerate(self.train_iter):
                 tgt_char = batch['tgt_char']
-                tgt_word = batch['tgt_word']
 
                 self.model.zero_grad()
                 outputs_char = self.model(batch)
@@ -144,7 +140,7 @@ class SpellCorrectTrainer:
             # correct_e, total_e, correct_ne, total_ne
             correct_total = [0, 0, 0, 0]
             epoch_loss = 0
-            for iteration, batch in enumerate(self.dev_iter):
+            for batch in self.dev_iter:
                 # Loss
                 outputs_char = self.model(batch, teacher_force=False)
                 loss_char = self._compute_loss(outputs_char, batch['tgt_char'])
@@ -250,7 +246,7 @@ class SpellCorrectTrainer:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--batch_size", default=32,
+    parser.add_argument("--batch_size", default=16,
                         type=int, help="Batch size.")
     parser.add_argument("--epochs", default=20, type=int,
                         help="Number of epochs.")

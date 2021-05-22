@@ -55,7 +55,7 @@ class Encoder(nn.Module):
             bert_encodings = (bert_encodings.clone(),
                               bert_encodings.clone())
 
-        outputs, hidden = self.rnn(embedded_packed)
+        outputs, hidden = self.rnn(embedded_packed, bert_encodings)
         outputs, _ = pad_packed_sequence(outputs)
         # hidden[-2, :, :]: [1, batch_size, rnn_dim]
         # backward_forward: [batch_size, rnn_dim * 2]
@@ -153,8 +153,8 @@ class Decoder(nn.Module):
         # embedded: [1, batch_size, cle_dim]
         embedded = self.embedding(input)
         if hidden_tgt_char is not None:
-            embedded = self.dropout(
-                torch.cat([embedded, hidden_tgt_char], dim=-1))
+            embedded = torch.cat([embedded, hidden_tgt_char], dim=-1)
+        embedded = self.dropout(embedded)
         # weighted_encoder_rep: [1, batch_size, 2*rnn_dim]
         weighted_encoder_rep, attn_weights = self._weighted_encoder_rep(decoder_hidden,
                                                                         encoder_outputs)

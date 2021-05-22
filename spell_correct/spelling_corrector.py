@@ -4,7 +4,6 @@ import torch
 from torch import Tensor
 import torch.nn.functional as F
 import torch.nn as nn
-from torch.nn.utils.rnn import pad_sequence
 
 from transformers import AutoModel
 
@@ -96,7 +95,6 @@ class SpellingCorrector(nn.Module):
                 return_valid_indexes: bool = False) -> Tensor:
         """- `batch_size_char` is the number of valid words (not padded) in the char src input
            - src_char -> [max_len_src_word + 1, batch_size_word, max_len_src_char + 1]
-           - lengths_char -> [(max_len_src_char + 1) * batch_size_char]
            - tgt_char -> same as src_char
            - src_word -> [max_len_src_word + 1, batch_size_word]
            - tgt_word -> same as tgt_word
@@ -104,21 +102,23 @@ class SpellingCorrector(nn.Module):
            - teacher_forcing_ratio is probability to use teacher forcing
             e.g. if teacher_forcing_ratio is 0.75 we use teacher forcing 75% of the time"""
         src_char: Tensor = batch['src_char']
-        lengths_char_src: List[List[int]] = batch['lengths_char_src']
-        src_word: Tensor = batch['src_word']
-        lengths_word: List[int] = batch['lengths_word']
         tgt_char: Tensor = batch['tgt_char']
-        tgt_word: Tensor = batch['tgt_word']
         if batch.get('src_bert') is not None:
             src_bert: Optional[List[str]] = batch['src_bert']
             src_bert_mask: Optional[List[int]] = batch['src_bert_mask']
         else:
             src_bert, src_bert_mask = None, None
+        if batch.get('src_word') is not None:
+            src_word: Tensor = batch['src_word']
+            lengths_word: List[int] = batch['lengths_word']
+            tgt_word: Tensor = batch['tgt_word']
 
         processed_inputs = self._process_inputs(
             src_char, src_bert, src_bert_mask, tgt_char)
         # src_char_valid -> [max_len_src_char + 1, batch_size_char]
         src_char_valid = processed_inputs['src_char_valid']
+        # lengths_char_src -> [(max_len_src_char + 1) * batch_size_char]
+        lengths_char_src = processed_inputs['lengths_char_src']
         # src_indexes_valid -> [(max_len_src_char + 1) * batch_size_word]
         src_indexes_valid = processed_inputs['src_indexes_valid']
         # tgt_char_valid -> same as src_char_valid
@@ -198,9 +198,11 @@ class SpellingCorrector(nn.Module):
         src_char_debatch = src_char.reshape(-1, max_word_len)
         src_indexes_valid = torch.any(src_char_debatch, dim=1)
         src_char_valid = src_char_debatch[src_indexes_valid]
+        lengths_char_src = self._lengths(src_char_valid)
         src_char_valid = src_char_valid.permute(1, 0)
 
         processed_inputs = {'src_char_valid': src_char_valid,
+                            'lengths_char_src': lengths_char_src,
                             'src_indexes_valid': src_indexes_valid,
                             'tgt_char_valid': tgt_char_valid,
                             'tgt_indexes_valid': tgt_indexes_valid,
@@ -208,7 +210,17 @@ class SpellingCorrector(nn.Module):
 
         return processed_inputs
 
-
+    def _lengths(self, src):
+        mask = torch.where(src != 0)[1]
+        zero_indexes = torch.where(mask == 0)[0]
+        zero_indexes = torch.cat(
+            [zero_indexes, torch.tensor([mask.shape[0]], device=self.device)])
+        lengths = []
+        for i in range(1, zero_indexes.shape[0]):
+            lengths.append((zero_indexes[i] - zero_indexes[i-1]).item())
+        return lengths
+    
+    
     def _scatter(self, h, indexes, batch_shape):
         indexes = indexes.nonzero().expand_as(h)
         hidden_char_batch = torch.full((batch_shape[0]*batch_shape[1], h.shape[1]),

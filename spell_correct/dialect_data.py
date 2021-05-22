@@ -1,7 +1,11 @@
+import re
+import regex
+import os
+from collections import Counter
+
 import torch
 from torch.utils.data import Dataset, DataLoader, random_split
 from transformers import BertTokenizerFast
-from transformers.utils.dummy_pt_objects import DPR_QUESTION_ENCODER_PRETRAINED_MODEL_ARCHIVE_LIST
 
 from spell_correct.utils import pad_sents_char, pad_sents
 from spell_correct.utils import AlignmentHandler
@@ -20,15 +24,11 @@ class DialectData(Dataset):
         self.src_raw = [f[0] for f in data]
         self.tgt_raw = [f[1] for f in data]
         self.src_char = [f[2] for f in data]
-        self.lengths_char_src = [[len(word) for word in sent]
-                                 for sent in self.src_char]
         self.src_char = pad_sents_char(self.src_char,
                                        self.vocab.src.char2id['<pad>'],
                                        max_sent_length=args.max_sent_len,
                                        max_word_length=args.max_decode_len)
         self.tgt_char = [f[3] for f in data]
-        self.lengths_char_tgt = [[len(word) for word in sent]
-                                 for sent in self.tgt_char]
         self.tgt_char = pad_sents_char(self.tgt_char,
                                        self.vocab.tgt.char2id['<pad>'],
                                        max_sent_length=args.max_sent_len,
@@ -52,8 +52,7 @@ class DialectData(Dataset):
             == len(self.tgt_char) == len(self.tgt_word) if args.use_sent_level else len(self.tgt_char) \
             == len(self.src_bert) if args.use_bert_enc else len(self.src_char) \
             == len(self.src_bert_mask) if args.use_bert_enc else len(self.src_char) \
-            == len(self.lengths_char_src) == len(self.lengths_word) if args.use_sent_level else len(self.lengths_char_src)\
-            == len(self.lengths_char_tgt), 'Error in data compilation'
+            == len(self.lengths_word) if args.use_sent_level else len(self.src_char), 'Error in data compilation'
 
     def __getitem__(self, index):
         src_bert = getattr(self, 'src_bert', None)
@@ -70,14 +69,12 @@ class DialectData(Dataset):
             lengths_word = lengths_word[index]
         inputs = dict(src_raw=self.src_raw[index],
                       src_char=self.src_char[index],
-                      lengths_char_src=self.lengths_char_src[index],
                       src_word=src_word,
                       lengths_word=lengths_word,
                       src_bert=src_bert,
                       src_bert_mask=src_bert_mask,
                       tgt_raw=self.tgt_raw[index],
                       tgt_char=self.tgt_char[index],
-                      lengths_char_tgt=self.lengths_char_tgt[index],
                       tgt_word=tgt_word)
         return inputs
 
@@ -87,13 +84,12 @@ class DialectData(Dataset):
     def generate_batch(self, data_batch):
         src_raw_batch, tgt_raw_batch = [], []
         src_char_batch, src_word_batch = [], []
-        lengths_char_src_batch, lengths_word_batch = [], []
+        lengths_word_batch = []
         src_bert_batch, src_bert_mask_batch = [], []
         tgt_char_batch, tgt_word_batch = [], []
         for inputs in data_batch:
             src_raw_batch.append(inputs['src_raw'])
             src_char_batch.append(inputs['src_char'])
-            lengths_char_src_batch += inputs['lengths_char_src']
             tgt_raw_batch.append(inputs['tgt_raw'])
             tgt_char_batch.append(inputs['tgt_char'])
             if inputs['src_word']:
@@ -106,11 +102,8 @@ class DialectData(Dataset):
 
         src_char_batch = torch.tensor(src_char_batch, dtype=torch.long).permute(
             1, 0, 2).to(self.device)
-        lengths_char_src_batch = torch.tensor(
-            lengths_char_src_batch, dtype=torch.long)
         tgt_char_batch = torch.tensor(tgt_char_batch, dtype=torch.long).permute(
             1, 0, 2).to(self.device)
-
         if src_word_batch:
             tgt_word_batch = torch.tensor(tgt_word_batch, dtype=torch.long).permute(
                 1, 0).to(self.device)
@@ -126,7 +119,6 @@ class DialectData(Dataset):
 
         batch = dict(src_raw=src_raw_batch,
                     src_char=src_char_batch,
-                    lengths_char_src=lengths_char_src_batch,
                     src_word=src_word_batch if src_word_batch else None,
                     lengths_word=lengths_word_batch if lengths_word_batch else None,
                     src_bert=src_bert_batch if src_bert_batch else None,
@@ -137,6 +129,42 @@ class DialectData(Dataset):
 
         return batch
 
+
+def split_into_src_tgt():
+    with open('/local/ccayral/orthonormalDA/data/coda-corpus/dialects/Cairo.tsv') as f, \
+            open('/local/ccayral/orthonormalDA/data/coda-corpus/cairo_src.txt', 'w') as f_r, \
+            open('/local/ccayral/orthonormalDA/data/coda-corpus/cairo_tgt.txt', 'w') as f_c:
+        for line in f:
+            line = line.split('\t')
+            if not line[0].isnumeric():
+                continue
+            raw, coda = line[3].strip(), line[4].strip()
+            raw = regex.sub(r'[^\P{P}،]+', '', raw)
+            coda = regex.sub(r'[^\P{P}،]+', '', coda)
+            raw = re.sub(r'(\b)(\w+)(\b)', r'\1 \2 \3', raw)
+            raw = re.sub(r'( ){2,}', r'\1', raw)
+            coda = re.sub(r'(\b)(\w+)(\b)', r'\1 \2 \3', coda)
+            coda = re.sub(r'( ){2,}', r'\1', coda)
+            raw = re.split(r'،', raw)
+            coda = re.split(r'،', coda)
+            assert len(raw) == len(coda), 'Wrong splitting of sentences'
+            for r, c in zip(raw, coda):
+                if r not in ['', ' '] and c not in ['', ' ']:
+                    print(r.strip(), file=f_r)
+                    print(c.strip(), file=f_c)
+
+
+def generate_char_dict():
+    char_dict = Counter()
+    for file in os.scandir('/local/ccayral/orthonormalDA/data/coda-corpus/dialects'):
+        with open(file) as f:
+            for line in f:
+                line = line.split('\t')
+                if not line[0].isnumeric():
+                    continue
+                raw, coda = line[3].strip(), line[4].strip()
+                char_dict.update(raw)
+                char_dict.update(coda)
 
 def load_data(args, vocab, device):
     alignment_handler = AlignmentHandler(already_split=False, n=3)
