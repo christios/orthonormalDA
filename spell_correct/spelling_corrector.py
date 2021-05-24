@@ -38,7 +38,6 @@ class SpellingCorrector(nn.Module):
                                enc_hid_dim=args.rnn_dim_char,
                                dec_hid_dim=args.rnn_dim_char,
                                num_layers=args.rnn_layers,
-                               bert_emb_dim=0,#self.bert_encoder.config.hidden_size,
                                dropout=args.dropout)
         self.attention = Attention(enc_hid_dim=args.rnn_dim_char,
                                    dec_hid_dim=args.rnn_dim_char,
@@ -192,6 +191,7 @@ class SpellingCorrector(nn.Module):
             logits_words = self._map_bpe_tokens_to_tgt(logits_words, src_bert)
             tgt_outputs = self.rel(self.word_to_char_bert(logits_words))
             bert_encodings = tgt_outputs.unsqueeze(0)
+            # assert bert_
 
         # Equivalent of tf.gather_nd() for src and tgt
         max_word_len = self.args.max_decode_len + 1

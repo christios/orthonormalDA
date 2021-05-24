@@ -300,7 +300,7 @@ def main():
     args = parser.parse_args([] if "__file__" not in globals() else None)
 
     # args.load = '/local/ccayral/orthonormalDA1/model_weights/train-2021-05-22_10:20:28-bs=16,cd=128,ds=10000,e=20,gi=6,mdl=25,msl=35,rd=512,rdc=256,rl=1,s=42,ube=False,usl=False,wd=256.pt'
-    args.use_bert_enc = True
+    # args.use_bert_enc = True
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)

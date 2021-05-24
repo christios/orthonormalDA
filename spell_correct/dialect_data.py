@@ -6,6 +6,7 @@ from collections import Counter
 import torch
 from torch.utils.data import Dataset, DataLoader, random_split
 from transformers import BertTokenizerFast
+from torch import Tensor
 
 from spell_correct.utils import pad_sents_char, pad_sents
 from spell_correct.utils import AlignmentHandler
@@ -119,10 +120,10 @@ class DialectData(Dataset):
 
         batch = dict(src_raw=src_raw_batch,
                     src_char=src_char_batch,
-                    src_word=src_word_batch if src_word_batch is not None else None,
-                    lengths_word=lengths_word_batch if lengths_word_batch is not None else None,
-                    src_bert=src_bert_batch if src_bert_batch is not None else None,
-                    src_bert_mask=src_bert_mask_batch if src_bert_mask_batch is not None else None,
+                    src_word=src_word_batch if isinstance(src_word_batch, Tensor) else None,
+                    lengths_word=lengths_word_batch if isinstance(lengths_word_batch, Tensor) else None,
+                     src_bert=src_bert_batch if isinstance(src_bert_batch, Tensor) else None,
+                     src_bert_mask=src_bert_mask_batch if isinstance(src_bert_mask_batch, Tensor) else None,
                     tgt_raw=tgt_raw_batch,
                     tgt_char=tgt_char_batch,
                     tgt_word=tgt_word_batch if tgt_word_batch is not None else None)

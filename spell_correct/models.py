@@ -14,7 +14,6 @@ class Encoder(nn.Module):
                  enc_hid_dim: int,
                  dec_hid_dim: int,
                  char_emb_dim: int = 0,
-                 bert_emb_dim: int = 0,
                  num_layers: int = 1,
                  dropout: float = 0.1):
         super().__init__()
@@ -26,7 +25,7 @@ class Encoder(nn.Module):
         self.num_layers = num_layers
         self.dropout = dropout
         self.embedding = nn.Embedding(input_dim, emb_dim)
-        self.rnn = nn.LSTM(input_size=emb_dim + char_emb_dim + bert_emb_dim,
+        self.rnn = nn.LSTM(input_size=emb_dim + char_emb_dim,
                            hidden_size=enc_hid_dim,
                            bidirectional=True,
                            num_layers=num_layers)
