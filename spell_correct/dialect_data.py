@@ -119,13 +119,13 @@ class DialectData(Dataset):
 
         batch = dict(src_raw=src_raw_batch,
                     src_char=src_char_batch,
-                    src_word=src_word_batch if src_word_batch else None,
-                    lengths_word=lengths_word_batch if lengths_word_batch else None,
-                    src_bert=src_bert_batch if src_bert_batch else None,
-                    src_bert_mask=src_bert_mask_batch if src_bert_mask_batch else None,
+                    src_word=src_word_batch if src_word_batch is not None else None,
+                    lengths_word=lengths_word_batch if lengths_word_batch is not None else None,
+                    src_bert=src_bert_batch if src_bert_batch is not None else None,
+                    src_bert_mask=src_bert_mask_batch if src_bert_mask_batch is not None else None,
                     tgt_raw=tgt_raw_batch,
                     tgt_char=tgt_char_batch,
-                    tgt_word=tgt_word_batch if tgt_word_batch else None)
+                    tgt_word=tgt_word_batch if tgt_word_batch is not None else None)
 
         return batch
 

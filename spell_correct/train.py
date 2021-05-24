@@ -34,7 +34,7 @@ class SpellCorrectTrainer:
         self.criterion_char = nn.CrossEntropyLoss(
             ignore_index=self.vocab.tgt.char2id['<pad>'])
         self.optimizer = optim.Adam(self.model.parameters())
-        self.scheduler = ReduceLROnPlateau(self.optimizer, 'min', patience=3)
+        self.scheduler = ReduceLROnPlateau(self.optimizer, 'min', patience=5, factor=0.5)
         self.writer = SummaryWriter(os.path.join(args.logs, 'tensorboard'))
 
         self.src_to_tgt = np.vectorize(
@@ -157,7 +157,7 @@ class SpellCorrectTrainer:
         metrics['dev_loss'] = epoch_loss / len(self.dev_iter)
         return metrics
 
-    def predict(self, args, data=None):
+    def predict(self, data=None):
         if data:
             iterator = process_raw_inputs(data)
         else:
@@ -194,20 +194,16 @@ class SpellCorrectTrainer:
         return matrices
 
     def label_predictions(self, predictions, raw_inputs, raw_golds):
+        train_corpus = [
+            token for sent in self.train_iter.dataset.src_raw for token in sent.split()]
         labels = []
         for pred, raw_input, raw_gold in zip(predictions, raw_inputs, raw_golds):
             labels.append([])
             for word_pred, word_raw_input, word_raw_gold in zip(pred, raw_input, raw_gold):
-                if word_raw_input == word_raw_gold:
-                    if word_pred == word_raw_gold:
-                        labels[-1].append(('EQUAL', 'CORRECT'))
-                    else:
-                        labels[-1].append(('EQUAL', 'INCORRECT'))
-                else:
-                    if word_pred == word_raw_gold:
-                        labels[-1].append(('NOT EQUAL', 'CORRECT'))
-                    else:
-                        labels[-1].append(('NOT EQUAL', 'INCORRECT'))
+                labels[-1].append(
+                    ('EQUAL' if word_raw_input == word_raw_gold else 'NOT EQUAL', 
+                     'CORRECT' if word_pred == word_raw_gold else 'INCORRECT',
+                     'IN_TRAIN' if word_raw_input in train_corpus else ''))
         return labels
 
     
@@ -248,7 +244,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch_size", default=16,
                         type=int, help="Batch size.")
-    parser.add_argument("--epochs", default=20, type=int,
+    parser.add_argument("--epochs", default=50, type=int,
                         help="Number of epochs.")
     parser.add_argument("--ce_dim", default=128, type=int,
                         help="Word embedding dimension.")
@@ -258,7 +254,7 @@ def main():
                         type=int, help="RNN cell dimension.")
     parser.add_argument("--rnn_dim", default=512,
                         type=int, help="RNN cell dimension.")
-    parser.add_argument("--rnn_layers", default=1,
+    parser.add_argument("--rnn_layers", default=2,
                         type=int, help="Number of RNN layers.")
     parser.add_argument("--data_size", default=10000, type=int,
                         help="Maximum number of examples to load.")
@@ -303,6 +299,9 @@ def main():
     parser.add_argument("--seed", default=42, type=int, help="Random seed.")
     args = parser.parse_args([] if "__file__" not in globals() else None)
 
+    # args.load = '/local/ccayral/orthonormalDA1/model_weights/train-2021-05-22_10:20:28-bs=16,cd=128,ds=10000,e=20,gi=6,mdl=25,msl=35,rd=512,rdc=256,rl=1,s=42,ube=False,usl=False,wd=256.pt'
+    args.use_bert_enc = True
+
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
@@ -312,7 +311,7 @@ def main():
         ",".join(("{}={}".format(re.sub(
             "(.)[^_]*_?", r"\1", key), value) for key, value in sorted(vars(args).items()) if isinstance(value, int)))
     )
-
+    # error_analysis(args)
     if not args.load:
         trainer = SpellCorrectTrainer(args)
         metrics = trainer.train()
@@ -328,11 +327,35 @@ def main():
         with open(os.path.join(args.logs, args.logdir), 'w') as f:
             for p, i, g, s, l in zip(predictions, inputs, golds, sentences, labels):
                 for p_word, i_word, g_word, r_word in zip(p, i, g, l):
+                    print(r_word[2], file=f, end='\t')
                     print(i_word, file=f, end='\t')
                     print(g_word, file=f, end='\t')
                     print(p_word, file=f, end='\t')
-                    print(f"{r_word[0]}\t{r_word[1]}", file=f, end='\t')
+                    # print(f"{r_word[0]}\t{r_word[1]}", file=f, end='\t')
                     print(s, file=f)
+
+
+def error_analysis(args):
+    trainer = SpellCorrectTrainer(args)
+    with open('/local/ccayral/orthonormalDA1/logs/train-2021-05-22_10:34:44-bs=16,cd=128,ds=10000,e=20,gi=6,mdl=25,msl=35,rd=512,rdc=256,rl=1,s=42,ube=False,usl=False,wd=256') as f:
+        e, ne = [], []
+        for line in f:
+            line = line.split('\t')
+            if line[3] == 'EQUAL':
+                e.append(tuple(line[:3]))
+            elif line[3] == 'NOT EQUAL':
+                ne.append(tuple(line[:3]))
+    train_corpus = [
+        token for sent in trainer.train_iter.dataset.src_raw for token in sent.split()]
+    total, in_train = 0, 0
+    for token in e:
+        total += 1
+        if token[0] in train_corpus:
+            in_train += 1
+    ratio = in_train / total
+    pass
+
+
 
 
 if __name__ == '__main__':

@@ -14,6 +14,7 @@ class Encoder(nn.Module):
                  enc_hid_dim: int,
                  dec_hid_dim: int,
                  char_emb_dim: int = 0,
+                 bert_emb_dim: int = 0,
                  num_layers: int = 1,
                  dropout: float = 0.1):
         super().__init__()
@@ -25,8 +26,10 @@ class Encoder(nn.Module):
         self.num_layers = num_layers
         self.dropout = dropout
         self.embedding = nn.Embedding(input_dim, emb_dim)
-        self.rnn = nn.LSTM(emb_dim + char_emb_dim,
-                           enc_hid_dim, bidirectional=True)
+        self.rnn = nn.LSTM(input_size=emb_dim + char_emb_dim + bert_emb_dim,
+                           hidden_size=enc_hid_dim,
+                           bidirectional=True,
+                           num_layers=num_layers)
         self.dropout = nn.Dropout(dropout)
         self.enc_to_dec = nn.Linear(self.enc_hid_dim*2, self.dec_hid_dim)
 
@@ -52,15 +55,17 @@ class Encoder(nn.Module):
 
         if bert_encodings is not None:
             bert_encodings = torch.cat(2*[bert_encodings])
-            bert_encodings = (bert_encodings.clone(),
-                              bert_encodings.clone())
+            bert_encodings = (torch.cat([bert_encodings.clone()] + [torch.zeros_like(bert_encodings) for i in range(self.num_layers - 1)]),
+                              torch.cat([bert_encodings.clone()] + [torch.zeros_like(bert_encodings) for i in range(self.num_layers - 1)]))
 
         outputs, hidden = self.rnn(embedded_packed, bert_encodings)
         outputs, _ = pad_packed_sequence(outputs)
         # hidden[-2, :, :]: [1, batch_size, rnn_dim]
-        # backward_forward: [batch_size, rnn_dim * 2]
         h = hidden[0][0, :, :] + hidden[0][1, :, :]
         c = hidden[1][0, :, :] + hidden[1][1, :, :]
+        for i in range(self.num_layers - 1):
+            h = torch.stack([h, hidden[0][i + 2, :, :] + hidden[0][i + 3, :, :]])
+            c = torch.stack([c, hidden[1][i + 2, :, :] + hidden[1][i + 3, :, :]])
         hidden = (h, c)
         #outputs = [src_len, batch_size, rnn_dim * 2] because 2 directions
         #hidden = [batch_size, rnn_dim]
@@ -86,7 +91,7 @@ class Attention(nn.Module):
         encoder_outputs: [src_len, batch_size, 2*rnn_dim]"""
         src_len = encoder_outputs.shape[0]
         # decoder_hidden: [batch_size, 1, dec rnn_dim]
-        decoder_hidden = decoder_hidden[0].unsqueeze(1)
+        decoder_hidden = torch.sum(decoder_hidden[0], dim=0).unsqueeze(1)
         # repeated_hidden: [batch_size, src_len, rnn_dim]
         repeated_decoder_hidden = decoder_hidden.repeat(1, src_len, 1)
         # encoder_outputs: [batch_size, src_len, 2*rnn_dim]
@@ -108,6 +113,7 @@ class Decoder(nn.Module):
                  enc_hid_dim: int,
                  dec_hid_dim: int,
                  attention: nn.Module,
+                 num_layers: int = 1,
                  char_emb_dim: int = 0,
                  dropout: float = 0.1):
         super().__init__()
@@ -119,8 +125,9 @@ class Decoder(nn.Module):
         self.attention = attention
 
         self.embedding = nn.Embedding(output_dim, emb_dim)
-        self.rnn = nn.LSTM((enc_hid_dim * 2) + emb_dim +
-                           char_emb_dim, dec_hid_dim)
+        self.rnn = nn.LSTM(input_size=2*enc_hid_dim + emb_dim + char_emb_dim,
+                           hidden_size=dec_hid_dim,
+                           num_layers=num_layers)
         self.dropout = nn.Dropout(dropout)
 
     def _weighted_encoder_rep(self,
@@ -162,8 +169,6 @@ class Decoder(nn.Module):
         rnn_input = torch.cat((embedded, weighted_encoder_rep), dim=2)
         # output: [1, batch_size, rnn_dim] tgt_len = 1 (decoding steps)
         # decoder_hidden: [1, batch_size, rnn_dim]
-        decoder_hidden = (decoder_hidden[0].unsqueeze(
-            0), decoder_hidden[1].unsqueeze(0))
         # output == decoder_hidden
         output, decoder_hidden = self.rnn(rnn_input, decoder_hidden)
         # embedded: [batch_size, cle_dim]
@@ -175,8 +180,6 @@ class Decoder(nn.Module):
         output = torch.cat((output,
                             weighted_encoder_rep,
                             embedded), dim=1)
-        decoder_hidden = (decoder_hidden[0].squeeze(
-            0), decoder_hidden[1].squeeze(0))
         return output, decoder_hidden, attn_weights.squeeze(1)
 
 

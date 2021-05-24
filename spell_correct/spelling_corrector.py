@@ -27,14 +27,18 @@ class SpellingCorrector(nn.Module):
                 args.bert_model, cache_dir=args.bert_cache_dir)
             self.bert_encoder.config.eos_token_id = self.bert_tokenizer.sep_token_id
             self.bert_encoder.config.pad_token_id = self.bert_tokenizer.pad_token_id
-            self.word_to_char = nn.Linear(
-                self.bert_encoder.config.hidden_size, args.rnn_dim_char, bias=False)
+            self.word_to_char_bert = nn.Linear(
+                self.bert_encoder.config.hidden_size, args.rnn_dim_char)
+            self.rel = nn.ReLU()
+            for param in self.bert_encoder.parameters():
+                param.requires_grad = False
 
         self.encoder = Encoder(input_dim=len(vocab.src.char2id),
                                emb_dim=args.ce_dim,
                                enc_hid_dim=args.rnn_dim_char,
                                dec_hid_dim=args.rnn_dim_char,
                                num_layers=args.rnn_layers,
+                               bert_emb_dim=0,#self.bert_encoder.config.hidden_size,
                                dropout=args.dropout)
         self.attention = Attention(enc_hid_dim=args.rnn_dim_char,
                                    dec_hid_dim=args.rnn_dim_char,
@@ -43,6 +47,7 @@ class SpellingCorrector(nn.Module):
                                emb_dim=args.ce_dim,
                                enc_hid_dim=args.rnn_dim_char,
                                dec_hid_dim=args.rnn_dim_char,
+                               num_layers=args.rnn_layers,
                                attention=self.attention,
                                dropout=args.dropout)
         self.generator = Generator(
@@ -185,7 +190,7 @@ class SpellingCorrector(nn.Module):
                                         use_cache=use_cache)
             logits_words = outputs.last_hidden_state
             logits_words = self._map_bpe_tokens_to_tgt(logits_words, src_bert)
-            tgt_outputs = self.word_to_char_bert(logits_words)
+            tgt_outputs = self.rel(self.word_to_char_bert(logits_words))
             bert_encodings = tgt_outputs.unsqueeze(0)
 
         # Equivalent of tf.gather_nd() for src and tgt
