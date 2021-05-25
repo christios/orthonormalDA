@@ -82,11 +82,14 @@ class SpellCorrectTrainer:
             tgt_mask = tgt_perm[mask] != self.vocab.tgt['<pad>']
             pred_valid = resized_predictions[mask] * tgt_mask
             correct_forms = torch.all(tgt_perm[mask] == pred_valid, dim=1)
+            if i == 1:
+                ne_changed = torch.all(src_mapped_to_tgt[mask] == pred_valid, dim=1)
             total_len = tgt_perm[mask].shape[0]
             correct_len = torch.sum(correct_forms).item()
             correct_total[i * 2] += correct_len
             correct_total[i * 2 + 1] += total_len
             total += total_len
+        correct_total.append(correct_total[-1] - torch.sum(ne_changed).item())
         assert total == src_perm.shape[0]
         return correct_total
     
@@ -117,17 +120,17 @@ class SpellCorrectTrainer:
             end_time = time.time()
             epoch_mins, epoch_secs = SpellCorrectTrainer.epoch_time(
                 start_time, end_time)
+            log_output = 'Evaluation...\n'
             metrics_val_step = self.evaluate()
             for m in metrics_val_step:
                 metrics_val.setdefault(m, []).append(metrics_val_step[m])
             metrics = {**metrics_train, **metrics_val}
             print(
                 f'Epoch {epoch+1}/{self.args.epochs} | Time: {epoch_mins}m {epoch_secs}s')
-            print(
-                (f"\ttrain_loss: {metrics['train_loss'][-1]:.7f}\n"
-                    f"\tdev_loss: {metrics['dev_loss'][-1]:.7f}\n"
-                    f"dev_acc_e_char: {metrics['dev_acc_e_char'][-1]:.1%} | dev_acc_ne_char: {metrics['dev_acc_ne_char'][-1]:.1%}"))
-            print()
+            for m, v in metrics.items():
+                log_output += (f"\t{m.ljust(25)}: {metrics[m][-1]:.7f}\n" if 'loss' in m
+                    else f"\t{m.ljust(25)}: {metrics[m][-1]:.1%}\n")
+            print(log_output)
             self.scheduler.step(metrics['dev_loss'][-1])
 
         self.save_model()
@@ -138,7 +141,7 @@ class SpellCorrectTrainer:
         self.model.eval()
         with torch.no_grad():
             # correct_e, total_e, correct_ne, total_ne
-            correct_total = [0, 0, 0, 0]
+            correct_total = [0, 0, 0, 0, 0]
             epoch_loss = 0
             for batch in self.dev_iter:
                 # Loss
@@ -152,8 +155,9 @@ class SpellCorrectTrainer:
                 correct_total = [sum(x) for x in zip(correct_total, correct_total_batch)]
 
         metrics = {}
-        metrics['dev_acc_e_char'] = correct_total[0] / correct_total[1]
-        metrics['dev_acc_ne_char'] = correct_total[2] / correct_total[3]
+        metrics['dev_recall'] = (correct_total[0] + correct_total[4]) / (correct_total[1] + correct_total[3])
+        metrics['dev_precision'] = correct_total[2] / correct_total[3]
+        metrics['dev_f1'] = 2 * (metrics['dev_recall'] * metrics['dev_precision']) / (metrics['dev_recall'] + metrics['dev_precision'])
         metrics['dev_loss'] = epoch_loss / len(self.dev_iter)
         return metrics
 
@@ -301,7 +305,7 @@ def main():
     args = parser.parse_args([] if "__file__" not in globals() else None)
 
     # args.load = '/local/ccayral/orthonormalDA1/model_weights/train-2021-05-22_10:20:28-bs=16,cd=128,ds=10000,e=20,gi=6,mdl=25,msl=35,rd=512,rdc=256,rl=1,s=42,ube=False,usl=False,wd=256.pt'
-    args.use_bert_enc = 'concat'
+    args.use_bert_enc = 'init'
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
