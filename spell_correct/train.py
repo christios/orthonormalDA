@@ -266,8 +266,9 @@ def main():
                         help="Maximum length of BERT input sequence.")
     parser.add_argument("--dropout", default=0.2, type=float,
                         help="Probablility of dropout for encoder and decoder.")
-    parser.add_argument("--use_bert_enc", default=False, action='store_true',
-                        help="Whether or not we should initialize character decoder with BERT encoding of word to be decoded.")
+    parser.add_argument("--use_bert_enc", default='',
+                        help="How to use use BERT embeddings (either as initialization or as concatenated embeddings). Leave empty to exlcude embeddings",
+                        choices=['init', 'concat', ''])
     parser.add_argument("--use_sent_level", default=False, action='store_true',
                         help="Whether or not we should translate sentences (with hybrid embeddings) instead of words (character embeddings).")
     parser.add_argument("--gpu_index", default=6, type=int,
@@ -300,7 +301,7 @@ def main():
     args = parser.parse_args([] if "__file__" not in globals() else None)
 
     # args.load = '/local/ccayral/orthonormalDA1/model_weights/train-2021-05-22_10:20:28-bs=16,cd=128,ds=10000,e=20,gi=6,mdl=25,msl=35,rd=512,rdc=256,rl=1,s=42,ube=False,usl=False,wd=256.pt'
-    # args.use_bert_enc = True
+    args.use_bert_enc = 'concat'
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)

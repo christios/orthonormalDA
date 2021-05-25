@@ -13,19 +13,20 @@ class Encoder(nn.Module):
                  emb_dim: int,
                  enc_hid_dim: int,
                  dec_hid_dim: int,
-                 char_emb_dim: int = 0,
                  num_layers: int = 1,
+                 bert_emb_dim: int = 0,
                  dropout: float = 0.1):
         super().__init__()
 
         self.input_dim = input_dim
         self.emb_dim = emb_dim
+        self.bert_emb_dim = bert_emb_dim
         self.enc_hid_dim = enc_hid_dim
         self.dec_hid_dim = dec_hid_dim
         self.num_layers = num_layers
         self.dropout = dropout
         self.embedding = nn.Embedding(input_dim, emb_dim)
-        self.rnn = nn.LSTM(input_size=emb_dim + char_emb_dim,
+        self.rnn = nn.LSTM(input_size=emb_dim + bert_emb_dim,
                            hidden_size=enc_hid_dim,
                            bidirectional=True,
                            num_layers=num_layers)
@@ -44,6 +45,9 @@ class Encoder(nn.Module):
         src = self.embedding(src) if not integrated_gradients else src
         if hidden_char is not None:
             src = torch.cat([src, hidden_char], dim=-1)
+        if bert_encodings is not None and self.bert_emb_dim:
+            src = torch.cat([src, bert_encodings.repeat(src.size(0), 1, 1)], dim=-1)
+            bert_encodings = None
         # embedded = [src_len, batch_size, cle_dim]
         embedded = self.dropout(src)
         # outputs: [src_len, batch_size, 2*rnn_dim] final-layer hidden states

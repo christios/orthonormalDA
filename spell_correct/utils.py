@@ -97,7 +97,6 @@ class AlignmentHandler:
             y_split.append([re.sub(r'<space>', ' ', token[0])
                            for token in y_a])
             assert len(x_merged[-1]) == len(y_split[-1]), f'Wrong merging'
-        x_merged = [' '.join(sent) for sent in x_merged]
         return x_merged, y_split
 
 

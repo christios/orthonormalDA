@@ -32,12 +32,14 @@ class SpellingCorrector(nn.Module):
             self.rel = nn.ReLU()
             for param in self.bert_encoder.parameters():
                 param.requires_grad = False
+        bert_emb_dim = self.bert_encoder.config.hidden_size if args.use_bert_enc == 'concat' else 0
 
         self.encoder = Encoder(input_dim=len(vocab.src.char2id),
                                emb_dim=args.ce_dim,
                                enc_hid_dim=args.rnn_dim_char,
                                dec_hid_dim=args.rnn_dim_char,
                                num_layers=args.rnn_layers,
+                               bert_emb_dim=bert_emb_dim,
                                dropout=args.dropout)
         self.attention = Attention(enc_hid_dim=args.rnn_dim_char,
                                    dec_hid_dim=args.rnn_dim_char,
@@ -183,18 +185,21 @@ class SpellingCorrector(nn.Module):
                         src_bert_mask=None,
                         tgt_char=None,
                         use_cache=False):
+        max_word_len = self.args.max_decode_len + 1
         bert_encodings = None
         if src_bert is not None and src_bert_mask is not None:
             outputs = self.bert_encoder(src_bert, src_bert_mask,
                                         use_cache=use_cache)
             logits_words = outputs.last_hidden_state
             logits_words = self._map_bpe_tokens_to_tgt(logits_words, src_bert)
-            tgt_outputs = self.rel(self.word_to_char_bert(logits_words))
-            bert_encodings = tgt_outputs.unsqueeze(0)
-            # assert bert_
+            logits_words_debatch = logits_words.reshape(-1, logits_words.size(-1))
+            bert_indexes_valid = torch.any(logits_words_debatch, dim=1)
+            logits_words_valid = logits_words_debatch[bert_indexes_valid]
+            if self.args.use_bert_enc == 'init':
+                logits_words_valid = self.rel(self.word_to_char_bert(logits_words_valid))
+            bert_encodings = logits_words_valid.unsqueeze(0)
 
         # Equivalent of tf.gather_nd() for src and tgt
-        max_word_len = self.args.max_decode_len + 1
         if tgt_char is not None:
             tgt_char_debatch = tgt_char.reshape(-1, max_word_len)
             tgt_indexes_valid = torch.any(tgt_char_debatch, dim=1)
@@ -205,6 +210,7 @@ class SpellingCorrector(nn.Module):
         src_char_valid = src_char_debatch[src_indexes_valid]
         lengths_char_src = self._lengths(src_char_valid)
         src_char_valid = src_char_valid.permute(1, 0)
+        assert bert_encodings.size(1) == src_char_valid.size(1)
 
         processed_inputs = {'src_char_valid': src_char_valid,
                             'lengths_char_src': lengths_char_src,
@@ -272,5 +278,7 @@ class SpellingCorrector(nn.Module):
                     j -= 1
             logits_words_[-1].reverse()
             logits_words_[-1] = torch.stack(logits_words_[-1])
-        logits_words = torch.cat(logits_words_, dim=0)
+            logits_words_[-1] = torch.cat(
+                [logits_words_[-1], torch.zeros(logits_words.shape[1:], device=self.device)], dim=0)[:logits_words.size(1) + 1, :]
+        logits_words = torch.stack(logits_words_, dim=0).permute(1, 0, 2)
         return logits_words

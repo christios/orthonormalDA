@@ -190,15 +190,14 @@ def load_data(args, vocab, device):
     else:
         src, tgt = alignment_handler.merge_split_src_tgt(
             src_raw, tgt_raw)
-        char_ids_src = vocab.src.words2charindices(
-            [sent.split() for sent in src])
+        char_ids_src = vocab.src.words2charindices(src)
         char_ids_tgt = vocab.tgt.words2charindices(tgt)
         src_char = char_ids_src[:args.data_size]
         tgt_char = char_ids_tgt[:args.data_size]
 
     src_bert, src_bert_mask = None, None
     if args.use_bert_enc:
-        src_bert = bert_tokenizer(src_raw,
+        src_bert = bert_tokenizer([' '.join(sent) for sent in src],
                                   padding="max_length",
                                   truncation=True,
                                   max_length=args.max_sent_len)
