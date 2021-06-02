@@ -246,9 +246,9 @@ class SpellCorrectTrainer:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--batch_size", default=16,
+    parser.add_argument("--batch_size", default=8,
                         type=int, help="Batch size.")
-    parser.add_argument("--epochs", default=50, type=int,
+    parser.add_argument("--epochs", default=25, type=int,
                         help="Number of epochs.")
     parser.add_argument("--ce_dim", default=128, type=int,
                         help="Word embedding dimension.")
@@ -304,8 +304,8 @@ def main():
     parser.add_argument("--seed", default=42, type=int, help="Random seed.")
     args = parser.parse_args([] if "__file__" not in globals() else None)
 
-    # args.load = '/local/ccayral/orthonormalDA1/model_weights/train-2021-05-22_10:20:28-bs=16,cd=128,ds=10000,e=20,gi=6,mdl=25,msl=35,rd=512,rdc=256,rl=1,s=42,ube=False,usl=False,wd=256.pt'
-    args.use_bert_enc = 'init'
+    # args.load = '/local/ccayral/orthonormalDA1/model_weights/train-2021-05-25_18:18:40-bs=8,cd=128,ds=10000,e=23,gi=6,mdl=25,msl=35,rd=512,rdc=256,rl=2,s=42,usl=False,wd=256.pt'
+    # args.use_bert_enc = 'init'
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -327,17 +327,17 @@ def main():
         print(metrics)
     else:
         trainer = SpellCorrectTrainer.load_model(args.load)
-        inputs, golds, predictions, sentences = trainer.predict(args)
+        inputs, golds, predictions, sentences = trainer.predict()
         labels = trainer.label_predictions(predictions, inputs, golds)
         with open(os.path.join(args.logs, args.logdir), 'w') as f:
             for p, i, g, s, l in zip(predictions, inputs, golds, sentences, labels):
                 for p_word, i_word, g_word, r_word in zip(p, i, g, l):
-                    print(r_word[2], file=f, end='\t')
-                    print(i_word, file=f, end='\t')
-                    print(g_word, file=f, end='\t')
+                    # print(r_word[2], file=f, end='\t')
+                    # print(i_word, file=f, end='\t')
+                    # print(g_word, file=f, end='\t')
                     print(p_word, file=f, end='\t')
                     # print(f"{r_word[0]}\t{r_word[1]}", file=f, end='\t')
-                    print(s, file=f)
+                    # print(s, file=f)
 
 
 def error_analysis(args):

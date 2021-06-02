@@ -210,7 +210,8 @@ class SpellingCorrector(nn.Module):
         src_char_valid = src_char_debatch[src_indexes_valid]
         lengths_char_src = self._lengths(src_char_valid)
         src_char_valid = src_char_valid.permute(1, 0)
-        assert bert_encodings.size(1) == src_char_valid.size(1)
+        if self.args.use_bert_enc:
+            assert bert_encodings.size(1) == src_char_valid.size(1)
 
         processed_inputs = {'src_char_valid': src_char_valid,
                             'lengths_char_src': lengths_char_src,
