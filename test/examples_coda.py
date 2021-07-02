@@ -1,5 +1,6 @@
 from spell_correct.utils import AlignmentHandler
 import json
+import re
 
 
 alignment_handler = AlignmentHandler(already_split=False, n=3)
@@ -17,4 +18,10 @@ with open('/local/ccayral/orthonormalDA1/data/coda-corpus/beirut_src.txt') as f_
                             'context': ' '.join(sent[1])
             }
             coda_examples.append(coda_example)
-    json.dump(coda_examples, f_w, ensure_ascii=False)
+    coda_examples_ = []
+    for example in coda_examples:
+        if example['coda'].startswith('ا') and not example['coda'].startswith('ال'):
+            coda_examples_.append(example)
+    pass
+
+    # json.dump(coda_examples, f_w, ensure_ascii=False)
