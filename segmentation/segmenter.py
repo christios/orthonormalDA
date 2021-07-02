@@ -10,7 +10,7 @@ from transformers import AutoModel
 from spell_correct.models import Encoder, Decoder, Attention, Generator
 
 
-class SpellingCorrector(nn.Module):
+class Segmenter(nn.Module):
     def __init__(self,
                  args,
                  device: torch.device,
@@ -61,36 +61,6 @@ class SpellingCorrector(nn.Module):
         self.char_vocab_size = len(vocab.tgt.char2id)
         self.max_tgt_len = args.max_decode_len
 
-    def compute_gradients_output_wrt_input(self, inputs, pred_outputs, gold_output):
-        """Computes the gradients for each image along the interpolation
-        path (i.e., `inputs`) with respect to the correct output (i.e., `gold_outputs`).
-        `gold_outputs`. `interp_step_size` is equivalent to `batch_size`.
-
-        Args:
-            inputs (torch.Tensor): [src_max_len, interp_step_size, emb_dim]
-                Inputs generating by interpolating from the null input to our actual input.
-            gold_outputs (torch.Tensor): [tgt_max_len, interp_step_size]
-                Contains the index of the gold output replicated `interp_step_size` times.
-            pred_outputs (torch.Tensor): [interp_step_size, tgt_vocab_size]
-                Predicted output at current time step for each of the inputs.
-
-        Returns:
-            gradients (torch.Tensor): [interp_step_size, src_max_len, emb_dim]
-                Gradients calculated for each interpolated input
-            probs (torch.Tensor): [interp_step_size]
-                Output predicted for each interpolated input
-
-        """
-        probs = F.softmax(pred_outputs, dim=1)
-        probs = probs[:, gold_output]
-        gradients = []
-        for i, prob in enumerate(probs):
-            self.zero_grad()
-            inputs.retain_grad()
-            prob.backward(retain_graph=True)
-            gradients.append(inputs.grad[1:, i, :].unsqueeze(0))
-        gradients = torch.cat(gradients)
-        return gradients, probs
 
     def forward(self,
                 batch: Dict[str, Union[Tensor,
