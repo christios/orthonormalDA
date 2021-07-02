@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 
 def argmax(vec):
@@ -33,9 +34,10 @@ class BiLSTM_CRF(nn.Module):
         self.START_TAG = vocab.src.start_of_word
         self.STOP_TAG = vocab.src.end_of_word
 
-        self.word_embeds = nn.Embedding(self.vocab_size, embedding_dim)
+        self.embedding = nn.Embedding(self.vocab_size, embedding_dim)
         self.lstm = nn.LSTM(embedding_dim, hidden_dim // 2,
                             num_layers=1, bidirectional=True)
+        self.dropout = nn.Dropout(0.1)
 
         # Maps the output of the LSTM into tag space.
         self.hidden2tag = nn.Linear(hidden_dim, self.tagset_size)
@@ -87,12 +89,42 @@ class BiLSTM_CRF(nn.Module):
         alpha = log_sum_exp(terminal_var)
         return alpha
 
-    def _get_lstm_features(self, sentence):
-        self.hidden = self.init_hidden()
-        embeds = self.word_embeds(sentence).view(len(sentence), 1, -1)
-        lstm_out, self.hidden = self.lstm(embeds, self.hidden)
-        lstm_out = lstm_out.view(len(sentence), self.hidden_dim)
-        lstm_feats = self.hidden2tag(lstm_out)
+    def _get_lstm_features(self,
+                            src,
+                            lengths,
+                            bert_encodings=None):
+        """- src: [src_len, batch_size]
+        - integrated_gradients: if True, then src is a batch of already embedded inputs
+        - 2 is the number of directions (forward/backward)"""
+        src = self.embedding(src)
+        if bert_encodings is not None and self.bert_emb_dim:
+            src = torch.cat([src, bert_encodings.repeat(src.size(0), 1, 1)], dim=-1)
+            bert_encodings = None
+        # embedded = [src_len, batch_size, cle_dim]
+        embedded = self.dropout(src)
+        # outputs: [src_len, batch_size, 2*rnn_dim] final-layer hidden states
+        # hidden: [2*rnn_layers, batch_size, rnn_dim] is the final hidden state of each layer-direction
+        # hidden: [forward_1, backward_1, forward_2, backward_2, ...]
+        embedded_packed = pack_padded_sequence(
+            embedded, lengths, enforce_sorted=False)
+
+        if bert_encodings is not None:
+            bert_encodings = torch.cat(2*[bert_encodings])
+            bert_encodings = (torch.cat([bert_encodings.clone()] + [torch.zeros_like(bert_encodings) for i in range(self.num_layers - 1)]),
+                            torch.cat([bert_encodings.clone()] + [torch.zeros_like(bert_encodings) for i in range(self.num_layers - 1)]))
+
+        outputs, hidden = self.lstm(embedded_packed, bert_encodings)
+        outputs, _ = pad_packed_sequence(outputs)
+        # hidden[-2, :, :]: [1, batch_size, rnn_dim]
+        h = hidden[0][0, :, :] + hidden[0][1, :, :]
+        c = hidden[1][0, :, :] + hidden[1][1, :, :]
+        for i in range(self.num_layers - 1):
+            h = torch.stack([h, hidden[0][i + 2, :, :] + hidden[0][i + 3, :, :]])
+            c = torch.stack([c, hidden[1][i + 2, :, :] + hidden[1][i + 3, :, :]])
+        hidden = (h, c)
+        #outputs = [src_len, batch_size, rnn_dim * 2] because 2 directions
+        #hidden = [batch_size, rnn_dim]
+        lstm_feats = self.hidden2tag(outputs)
         return lstm_feats
 
     def _score_sentence(self, feats, tags):
@@ -150,15 +182,15 @@ class BiLSTM_CRF(nn.Module):
         best_path.reverse()
         return path_score, best_path
 
-    def neg_log_likelihood(self, sentence, tags):
-        feats = self._get_lstm_features(sentence)
+    def neg_log_likelihood(self, src, lengths, bert_encodings, tags):
+        feats = self._get_lstm_features(src, lengths, bert_encodings)
         forward_score = self._forward_alg(feats)
         gold_score = self._score_sentence(feats, tags)
         return forward_score - gold_score
 
-    def forward(self, sentence):  # dont confuse this with _forward_alg above.
+    def forward(self, src, lengths, bert_encodings):
         # Get the emission scores from the BiLSTM
-        lstm_feats = self._get_lstm_features(sentence)
+        lstm_feats = self._get_lstm_features(src, lengths, bert_encodings)
 
         # Find the best path, given the features.
         score, tag_seq = self._viterbi_decode(lstm_feats)
