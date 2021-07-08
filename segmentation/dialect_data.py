@@ -2,14 +2,19 @@ import re
 import regex
 import os
 from collections import Counter
+import json
 
 import torch
 from torch.utils.data import Dataset, DataLoader, random_split
 from transformers import BertTokenizerFast
 from torch import Tensor
 
-from spell_correct.utils import pad_sents_char, pad_sents
-from spell_correct.utils import AlignmentHandler
+import pyarabic.araby as araby
+ALEFAT = araby.ALEFAT[:5] + tuple(araby.ALEFAT[-1])
+ALEFAT_PATTERN = re.compile(u"[" + u"".join(ALEFAT) + u"]", re.UNICODE)
+
+from segmentation.utils import pad_sents_char, pad_sents
+
 
 class DialectData(Dataset):
     def __init__(self, args, data, vocab, device) -> None:
@@ -21,62 +26,38 @@ class DialectData(Dataset):
             self.bert_tokenizer = BertTokenizerFast.from_pretrained(
                 args.bert_model, cache_dir=args.bert_cache_dir)
         
-        self.use_sent_level = args.use_sent_level
         self.src_raw = [f[0] for f in data]
         self.tgt_raw = [f[1] for f in data]
         self.src_char = [f[2] for f in data]
         self.src_char = pad_sents_char(self.src_char,
                                        self.vocab.src.char2id['<pad>'],
                                        max_sent_length=args.max_sent_len,
-                                       max_word_length=args.max_decode_len)
+                                       max_word_length=args.max_word_len)
         self.tgt_char = [f[3] for f in data]
         self.tgt_char = pad_sents_char(self.tgt_char,
-                                       self.vocab.tgt.char2id['<pad>'],
+                                       self.vocab.src.char2id['<pad>'],
                                        max_sent_length=args.max_sent_len,
-                                       max_word_length=args.max_decode_len)
+                                       max_word_length=args.max_word_len)
         if args.use_bert_enc:
             self.src_bert = [f[4] for f in data]
             self.src_bert_mask = [f[5] for f in data]
 
-        if args.use_sent_level:
-            self.src_word = [f[6] for f in data]
-            self.lengths_word = [len(sent) for sent in self.src_word]
-            self.src_word = pad_sents(self.src_word,
-                                      self.vocab.src.word2id['<pad>'],
-                                      maxlen=args.max_sent_len)
-            self.tgt_word = [f[7] for f in data]
-            self.tgt_word = pad_sents(self.tgt_word,
-                                      self.vocab.tgt.word2id['<pad>'],
-                                      maxlen=args.max_sent_len)
-
-        assert len(self.src_char) == len(self.src_word) if args.use_sent_level else len(self.src_char) \
-            == len(self.tgt_char) == len(self.tgt_word) if args.use_sent_level else len(self.tgt_char) \
+        assert len(self.src_char) == len(self.tgt_char) \
             == len(self.src_bert) if args.use_bert_enc else len(self.src_char) \
-            == len(self.src_bert_mask) if args.use_bert_enc else len(self.src_char) \
-            == len(self.lengths_word) if args.use_sent_level else len(self.src_char), 'Error in data compilation'
+            == len(self.src_bert_mask) if args.use_bert_enc else len(self.src_char), 'Error in data compilation'
 
     def __getitem__(self, index):
         src_bert = getattr(self, 'src_bert', None)
         src_bert_mask = getattr(self, 'src_bert_mask', None)
-        src_word = getattr(self, 'src_word', None)
-        tgt_word = getattr(self, 'tgt_word', None)
-        lengths_word = getattr(self, 'lengths_word', None)
         if src_bert:
             src_bert = src_bert[index]
             src_bert_mask = src_bert_mask[index]
-        if src_word:
-            src_word = src_word[index]
-            tgt_word = tgt_word[index]
-            lengths_word = lengths_word[index]
         inputs = dict(src_raw=self.src_raw[index],
                       src_char=self.src_char[index],
-                      src_word=src_word,
-                      lengths_word=lengths_word,
                       src_bert=src_bert,
                       src_bert_mask=src_bert_mask,
                       tgt_raw=self.tgt_raw[index],
-                      tgt_char=self.tgt_char[index],
-                      tgt_word=tgt_word)
+                      tgt_char=self.tgt_char[index],)
         return inputs
 
     def __len__(self):
@@ -84,19 +65,14 @@ class DialectData(Dataset):
 
     def generate_batch(self, data_batch):
         src_raw_batch, tgt_raw_batch = [], []
-        src_char_batch, src_word_batch = [], []
-        lengths_word_batch = []
+        src_char_batch = []
         src_bert_batch, src_bert_mask_batch = [], []
-        tgt_char_batch, tgt_word_batch = [], []
+        tgt_char_batch = []
         for inputs in data_batch:
             src_raw_batch.append(inputs['src_raw'])
             src_char_batch.append(inputs['src_char'])
             tgt_raw_batch.append(inputs['tgt_raw'])
             tgt_char_batch.append(inputs['tgt_char'])
-            if inputs['src_word']:
-                src_word_batch.append(inputs['src_word'])
-                lengths_word_batch.append(inputs['lengths_word'])
-                tgt_word_batch.append(inputs['tgt_word'])
             if inputs['src_bert']:
                 src_bert_batch.append(inputs['src_bert'])
                 src_bert_mask_batch.append(inputs['src_bert_mask'])
@@ -105,13 +81,6 @@ class DialectData(Dataset):
             1, 0, 2).to(self.device)
         tgt_char_batch = torch.tensor(tgt_char_batch, dtype=torch.long).permute(
             1, 0, 2).to(self.device)
-        if src_word_batch:
-            tgt_word_batch = torch.tensor(tgt_word_batch, dtype=torch.long).permute(
-                1, 0).to(self.device)
-            lengths_word_batch = torch.tensor(
-                lengths_word_batch, dtype=torch.long)
-            src_word_batch = torch.tensor(src_word_batch, dtype=torch.long).permute(
-                1, 0).to(self.device)
         if src_bert_batch:
             src_bert_batch = torch.tensor(
                 src_bert_batch, dtype=torch.long).to(self.device)
@@ -120,13 +89,10 @@ class DialectData(Dataset):
 
         batch = dict(src_raw=src_raw_batch,
                     src_char=src_char_batch,
-                    src_word=src_word_batch if isinstance(src_word_batch, Tensor) else None,
-                    lengths_word=lengths_word_batch if isinstance(lengths_word_batch, Tensor) else None,
-                     src_bert=src_bert_batch if isinstance(src_bert_batch, Tensor) else None,
-                     src_bert_mask=src_bert_mask_batch if isinstance(src_bert_mask_batch, Tensor) else None,
+                    src_bert=src_bert_batch if isinstance(src_bert_batch, Tensor) else None,
+                    src_bert_mask=src_bert_mask_batch if isinstance(src_bert_mask_batch, Tensor) else None,
                     tgt_raw=tgt_raw_batch,
-                    tgt_char=tgt_char_batch,
-                    tgt_word=tgt_word_batch if tgt_word_batch is not None else None)
+                    tgt_char=tgt_char_batch)
 
         return batch
 
@@ -168,36 +134,20 @@ def generate_char_dict():
                 char_dict.update(coda)
 
 def load_data(args, vocab, device):
-    alignment_handler = AlignmentHandler(already_split=False, n=3)
     if args.use_bert_enc:
         bert_tokenizer = BertTokenizerFast.from_pretrained(
             args.bert_model, cache_dir=args.bert_cache_dir)
-
-    with open(args.data_src) as f_src, open(args.data_tgt) as f_tgt:
-        src_raw = [line.strip() for line in f_src.readlines()]
-        tgt_raw = [line.strip() for line in f_tgt.readlines()]
     
-    src_word, tgt_word = None, None
-    if args.use_sent_level:
-        src = [line.split() for line in src_raw]
-        tgt = [line.split() for line in tgt_raw]
-        word_ids_src = vocab.src.words2indices(src, add_beg_end=False)
-        word_ids_tgt = vocab.tgt.words2indices(tgt)
-        char_ids_src = vocab.src.words2charindices(src, add_beg_end=False)
-        char_ids_tgt = vocab.tgt.words2charindices(tgt)
-        src_word = word_ids_src[:args.data_size]
-        tgt_word = word_ids_tgt[:args.data_size]
-    else:
-        src, tgt = alignment_handler.merge_split_src_tgt(
-            src_raw, tgt_raw)
-        char_ids_src = vocab.src.words2charindices(src)
-        char_ids_tgt = vocab.tgt.words2charindices(tgt)
-        src_char = char_ids_src[:args.data_size]
-        tgt_char = char_ids_tgt[:args.data_size]
+    src, src_raw, tgt, tgt_raw = read_asc(path=args.data)
+
+    char_ids_src = vocab.src.words2charindices(src, add_beg_end=False)
+    char_ids_tgt = [[[0 if c == '0' else 1 for c in w] for w in s] for s in tgt]
+    src_char = char_ids_src[:args.data_size]
+    tgt_char = char_ids_tgt[:args.data_size]
 
     src_bert, src_bert_mask = None, None
     if args.use_bert_enc:
-        src_bert = bert_tokenizer([' '.join(sent) for sent in src],
+        src_bert = bert_tokenizer([re.sub(r'_', '', ' '.join(sent)) for sent in src],
                                   padding="max_length",
                                   truncation=True,
                                   max_length=args.max_sent_len)
@@ -206,7 +156,7 @@ def load_data(args, vocab, device):
         src_bert_mask = src_bert_mask[:args.data_size]
 
     data = [x for x in [src_raw, tgt_raw, src_char, tgt_char,
-                        src_bert, src_bert_mask, src_word, tgt_word] if x]
+                        src_bert, src_bert_mask] if x]
     data = list(zip(*data))
 
     lengths = [int(len(src_char)*args.train_split),
@@ -223,6 +173,68 @@ def load_data(args, vocab, device):
     dev_iter = DataLoader(dev_data, batch_size=len(dev_data),
                             collate_fn=dev_data.generate_batch)
     return train_iter, dev_iter
+
+def read_asc(path):
+    with open(path) as f:
+        data = json.load(f)
+
+    src, src_raw, tgt, tgt_raw = [], [], [], []
+    for idx, d in enumerate(data):
+        src.append([])
+        tgt.append([])
+        for token_raw, token_morpho in zip(d['raw'], d['segments']):
+            src[-1] += [preprocess(t) for t in token_raw.split()]
+            token_morpho = ''.join(
+                [segment['text'] + '§' for segment in token_morpho])[:-1]
+            token_morpho = [c for c in token_morpho]
+            segments = []
+            for i in range(len(token_raw)):
+                if token_raw[i] == token_morpho[i]:
+                    if token_raw[i] == token_morpho[i] == ' ':
+                        segments.append('1')
+                    segments.append('0')
+                elif token_raw[i] == ' ' and token_morpho[i] == '§':
+                    segments.append(' ')
+                elif token_raw[i] != ' ' and token_morpho[i] == '§':
+                    segments[-1] = '1'
+                    del token_morpho[i]
+                    assert token_raw[i] == token_morpho[i], 'Error'
+                    segments.append('0')
+                else:
+                    raise 'Error'
+            tgt[-1] += ''.join(segments).split()
+
+        src_raw.append(preprocess(' '.join(d['raw'])))
+        tgt_raw.append(' '.join(tgt[-1]))
+    # Sanity check
+    assert len(src) == len(tgt), 'Number of sentences is not equal.'
+    for idx, (src_sent, tgt_sent) in enumerate(zip(src, tgt)):
+        assert len(src_sent) == len(
+            tgt_sent), 'Number of tokens in one of the sentences is not equal.'
+        for src_token, tgt_token in zip(src_sent, tgt_sent):
+            assert len(src_token) == len(
+                tgt_token), 'Mismatch between source and target.'
+            assert ' ' not in src_token, 'Space character in source token.'
+            assert tgt_token[-1] != '1', 'Wrong labeling'
+            assert len(tgt_token) == 1 and tgt_token[0] != '1' or len(tgt_token) != 1, 'Wrong labeling' 
+
+    tgt_raw = [' '.join(sent) for sent in tgt]
+    return src, src_raw, tgt, tgt_raw
+
+
+def preprocess(sentence):
+    sentence = araby.strip_tatweel(sentence)
+    sentence = sentence.replace(
+        araby.SMALL_ALEF+araby.ALEF_MAKSURA, araby.ALEF_MAKSURA)
+    sentence = sentence.replace(
+        araby.ALEF_MAKSURA+araby.SMALL_ALEF, araby.ALEF_MAKSURA)
+    sentence = re.sub(ALEFAT_PATTERN, araby.ALEF, sentence)
+    sentence = araby.normalize_ligature(sentence)
+    sentence = araby.normalize_teh(sentence)
+    sentence = araby.strip_tashkeel(sentence)
+    sentence = re.sub(r',', r'،', sentence)
+    sentence = re.sub(r'\?', r'؟', sentence)
+    return sentence
 
 
 def process_raw_inputs(args, vocab, raw_inputs, device):

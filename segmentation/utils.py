@@ -250,3 +250,6 @@ class AlignmentHandler:
             src_temp_.append((src_sub_temp, 'ne'))
             tgt_temp_.append((tgt_sub_temp, 'ne'))
         return src_temp_, tgt_temp_
+
+
+pass

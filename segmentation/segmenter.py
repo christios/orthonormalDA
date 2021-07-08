@@ -1,4 +1,5 @@
 from typing import Optional, List, Union, Dict
+from numpy import pad
 
 import torch
 from torch import Tensor
@@ -7,7 +8,8 @@ import torch.nn as nn
 
 from transformers import AutoModel
 
-from spell_correct.models import Encoder, Decoder, Attention, Generator
+from segmentation.models import BiLSTM_CRF
+
 
 
 class Segmenter(nn.Module):
@@ -21,6 +23,7 @@ class Segmenter(nn.Module):
         self.vocab = vocab
         self.device = device
         self.bert_tokenizer = bert_tokenizer
+        self.c = 0
 
         if args.use_bert_enc:
             self.bert_encoder = AutoModel.from_pretrained(
@@ -34,46 +37,28 @@ class Segmenter(nn.Module):
                 param.requires_grad = False
         bert_emb_dim = self.bert_encoder.config.hidden_size if args.use_bert_enc == 'concat' else 0
 
-        self.encoder = Encoder(input_dim=len(vocab.src.char2id),
-                               emb_dim=args.ce_dim,
-                               enc_hid_dim=args.rnn_dim_char,
-                               dec_hid_dim=args.rnn_dim_char,
-                               num_layers=args.rnn_layers,
-                               bert_emb_dim=bert_emb_dim,
-                               dropout=args.dropout)
-        self.attention = Attention(enc_hid_dim=args.rnn_dim_char,
-                                   dec_hid_dim=args.rnn_dim_char,
-                                   attn_dim=16)
-        self.decoder = Decoder(output_dim=len(vocab.tgt.char2id),
-                               emb_dim=args.ce_dim,
-                               enc_hid_dim=args.rnn_dim_char,
-                               dec_hid_dim=args.rnn_dim_char,
-                               num_layers=args.rnn_layers,
-                               attention=self.attention,
-                               dropout=args.dropout)
-        self.generator = Generator(
-            self.attention.attn_in + args.ce_dim, self.decoder.output_dim)
+        self.pad_token_idx = vocab.src.char2id['<pad>']
 
-        self.device = device
-        self.pad_token_idx = vocab.tgt.char2id['<pad>']
-        self.bow_token_idx = vocab.tgt.char2id['<w>']
-        self.eow_token_idx = vocab.tgt.char2id['</w>']
-        self.char_vocab_size = len(vocab.tgt.char2id)
-        self.max_tgt_len = args.max_decode_len
+        self.bi_lstm_crf = BiLSTM_CRF(input_dim=len(vocab.src.char2id),
+                                      num_tags=3,
+                                      emb_dim=args.ce_dim,
+                                      bert_emb_dim=bert_emb_dim,
+                                      rnn_dim=args.rnn_dim_char,
+                                      num_layers=args.rnn_layers,
+                                      dropout=args.dropout,
+                                      pad_index=self.pad_token_idx,
+                                      device=self.device)
+        
 
 
     def forward(self,
                 batch: Dict[str, Union[Tensor,
                                        List[List[int]], List[str], List[int], None]],
-                teacher_force: bool = True,
-                return_attn: bool = False,
-                integrated_gradients: bool = False,
-                return_valid_indexes: bool = False) -> Tensor:
+                use_crf=True,
+                decode=False) -> Tensor:
         """- `batch_size_char` is the number of valid words (not padded) in the char src input
            - src_char -> [max_len_src_word + 1, batch_size_word, max_len_src_char + 1]
            - tgt_char -> same as src_char
-           - src_word -> [max_len_src_word + 1, batch_size_word]
-           - tgt_word -> same as tgt_word
            - src_bert -> [batch_size_word, max_len_src_word]
            - teacher_forcing_ratio is probability to use teacher forcing
             e.g. if teacher_forcing_ratio is 0.75 we use teacher forcing 75% of the time"""
@@ -84,10 +69,6 @@ class Segmenter(nn.Module):
             src_bert_mask: Optional[List[int]] = batch['src_bert_mask']
         else:
             src_bert, src_bert_mask = None, None
-        if batch.get('src_word') is not None:
-            src_word: Tensor = batch['src_word']
-            lengths_word: List[int] = batch['lengths_word']
-            tgt_word: Tensor = batch['tgt_word']
 
         processed_inputs = self._process_inputs(
             src_char, src_bert, src_bert_mask, tgt_char)
@@ -95,58 +76,12 @@ class Segmenter(nn.Module):
         src_char_valid = processed_inputs['src_char_valid']
         # lengths_char_src -> [(max_len_src_char + 1) * batch_size_char]
         lengths_char_src = processed_inputs['lengths_char_src']
-        # src_indexes_valid -> [(max_len_src_char + 1) * batch_size_word]
-        src_indexes_valid = processed_inputs['src_indexes_valid']
         # tgt_char_valid -> same as src_char_valid
         tgt_char_valid = processed_inputs['tgt_char_valid']
-        tgt_indexes_valid = processed_inputs['tgt_indexes_valid']
         bert_encodings = processed_inputs['bert_encodings']
 
-        batch_size_char = src_char_valid.shape[1]  # number of valid words
-        max_len_tgt_char = tgt_char_valid.shape[0]
-        max_len_src_char = src_char_valid.shape[0]
-        tgt_vocab_size_char = self.decoder.output_dim
 
-        if return_attn:
-            attn_weights_batch = torch.zeros(
-                max_len_tgt_char, batch_size_char, max_len_src_char).to(self.device)
-        if integrated_gradients:
-            gradients, probs = [], []
-
-        encoder_outputs, hidden, embedded = self.encoder(
-            src_char_valid, lengths_char_src, bert_encodings, integrated_gradients=integrated_gradients)
-
-        outputs = torch.zeros(max_len_tgt_char-1, batch_size_char,
-            tgt_vocab_size_char).to(self.device)
-        # first input to the decoder is the <sos> token
-        output = tgt_char_valid[0, :]
-        for t in range(1, max_len_tgt_char):
-            # output = [batch_size, tgt_vocab]
-            output, hidden, attn_weights = self.decoder(
-                output, hidden, encoder_outputs)
-            output = self.generator(output)
-            if return_attn:
-                attn_weights_batch[t] = attn_weights
-            if integrated_gradients:
-                step_gradients, step_probs = self.compute_gradients_output_wrt_input(
-                    embedded, output, tgt_char_valid[t][0])
-                gradients.append(step_gradients)
-                probs.append(step_probs)
-            outputs[t - 1] = output
-            top1 = output.max(1)[1]
-            output = (tgt_char_valid[t] if teacher_force else top1)
-
-        outputs = [outputs]
-        if return_attn:
-            outputs.append(attn_weights_batch)
-        if integrated_gradients:
-            outputs.append(gradients)
-            outputs.append(probs)
-        if return_valid_indexes:
-            outputs.append(tgt_indexes_valid)
-        outputs = outputs[0] if len(outputs) == 1 else outputs
-
-        return outputs
+        return self.bi_lstm_crf(src_char_valid, tgt_char_valid, lengths_char_src, decode, use_crf, bert_encodings)
 
 
     def _process_inputs(self,
@@ -155,7 +90,8 @@ class Segmenter(nn.Module):
                         src_bert_mask=None,
                         tgt_char=None,
                         use_cache=False):
-        max_word_len = self.args.max_decode_len + 1
+        self.c += 1
+        max_word_len = self.args.max_word_len + 1
         bert_encodings = None
         if src_bert is not None and src_bert_mask is not None:
             outputs = self.bert_encoder(src_bert, src_bert_mask,
@@ -172,11 +108,11 @@ class Segmenter(nn.Module):
         # Equivalent of tf.gather_nd() for src and tgt
         if tgt_char is not None:
             tgt_char_debatch = tgt_char.reshape(-1, max_word_len)
-            tgt_indexes_valid = torch.any(tgt_char_debatch, dim=1)
+            tgt_indexes_valid = torch.any(tgt_char_debatch != self.pad_token_idx, dim=1)
             tgt_char_valid = tgt_char_debatch[tgt_indexes_valid]
             tgt_char_valid = tgt_char_valid.permute(1, 0)
         src_char_debatch = src_char.reshape(-1, max_word_len)
-        src_indexes_valid = torch.any(src_char_debatch, dim=1)
+        src_indexes_valid = torch.any(src_char_debatch != self.pad_token_idx, dim=1)
         src_char_valid = src_char_debatch[src_indexes_valid]
         lengths_char_src = self._lengths(src_char_valid)
         src_char_valid = src_char_valid.permute(1, 0)
@@ -193,7 +129,7 @@ class Segmenter(nn.Module):
         return processed_inputs
 
     def _lengths(self, src):
-        mask = torch.where(src != 0)[1]
+        mask = torch.where(src != self.pad_token_idx)[1]
         zero_indexes = torch.where(mask == 0)[0]
         zero_indexes = torch.cat(
             [zero_indexes, torch.tensor([mask.shape[0]], device=self.device)])

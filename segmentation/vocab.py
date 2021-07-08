@@ -21,7 +21,7 @@ import re
 
 import torch
 from typing import List
-from spell_correct.utils import read_corpus, pad_sents, pad_sents_char
+from segmentation.utils import read_corpus, pad_sents, pad_sents_char
 
 
 class VocabEntry(object):
@@ -47,11 +47,11 @@ class VocabEntry(object):
         ## Additions to the A4 code:
         # self.char_list = list("""ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789,;.!?:'\"/\\|_@#$%^&*~`+-=<>()[]""")
         self.char_list = list(
-            """"#()+-.aeghilmnorst،؛؟ءآأؤإئابةتثجحخدذرزسشصضطظعغفقكلمنهوىيٱچڤݣ """)
+            """"0123456789#()+-.aeghilmnorst،؛؟ءآأؤإئابةتثجحخدذرزسشصضطظعغفقكلمنهوىيٱچڤݣ _""")
         self.char2id = dict()  # Converts characters to integers
-        self.char2id['<pad>'] = 0
-        self.char2id['<w>'] = 1
-        self.char2id['</w>'] = 2
+        self.char2id['<pad>'] = 2
+        self.char2id['<w>'] = 0
+        self.char2id['</w>'] = 1
         self.char2id['<unk>'] = 3
         for i, c in enumerate(self.char_list):
             self.char2id[c] = len(self.char2id)
