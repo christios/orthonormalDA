@@ -47,12 +47,13 @@ class VocabEntry(object):
         ## Additions to the A4 code:
         # self.char_list = list("""ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789,;.!?:'\"/\\|_@#$%^&*~`+-=<>()[]""")
         self.char_list = list(
-            """"#()+-.aeghilmnorst،؛؟ءآأؤإئابةتثجحخدذرزسشصضطظعغفقكلمنهوىيٱچڤݣ """)
+            """"0123456789#()+-.aeghilmnorst،؛؟ءﺁأؤإئابةتثجحخدذرزسشصضطظعغفقكلمنهوىيٱچڤݣ _,:""")
         self.char2id = dict()  # Converts characters to integers
         self.char2id['<pad>'] = 0
         self.char2id['<w>'] = 1
         self.char2id['</w>'] = 2
         self.char2id['<unk>'] = 3
+        self.char2id['<b>'] = 4   # Segment Boundary
         for i, c in enumerate(self.char_list):
             self.char2id[c] = len(self.char2id)
         self.char_unk = self.char2id['<unk>']
@@ -115,15 +116,27 @@ class VocabEntry(object):
         else:
             return self[word]
 
-    def words2charindices(self, sents, add_beg_end=True):
+    def words2charindices(self, sents, add_beg_end=True, segments=False):
         """ Convert list of sentences of words into list of list of list of character indices.
         @param sents (list[list[str]]): sentence(s) in words
         @return word_ids (list[list[list[int]]]): sentence(s) in indices
+        If `segments` is True:
+        @param sents (list[list[list[str]]]): sentence(s) in tokens/segments
+        @return word_ids (list[list[list[list[int]]]]): sentence(s) in char indices
         """
+        if segments:
+            return [[[[self.char2id[c] for c in s] for s in t] for t in s] for s in sents]
         if add_beg_end:
             return [[[self.start_of_word]+[self.char2id[c] for c in w]+[self.end_of_word] for w in s] for s in sents]
         else:
             return [[[self.char2id[c] for c in w] for w in s] for s in sents]
+
+    def pos2indices(self, sents):
+        """ Convert list of sentences of words into list of list of indices.
+        @param sents (list[list[str]]): sentence(s) in words
+        @return word_ids (list[list[int]]): sentence(s) in indices
+        """
+        return [[[self[pos] for pos in t] for t in s] for s in sents]
 
     def words2indices(self, sents, add_beg_end=True):
         """ Convert list of sentences of words into list of list of indices.
@@ -174,6 +187,22 @@ class VocabEntry(object):
         sents_t = pad_sents(word_ids, self['<pad>'])
         sents_var = torch.tensor(sents_t, dtype=torch.long, device=device)
         return torch.t(sents_var)
+
+    @staticmethod
+    def build_pos_vocab(sents: List[List[List[str]]]):
+        pos_vocab = Counter()
+        for sent in sents:
+            for token in sent:
+                pos_vocab.update(token)
+        pos2id = dict()
+        pos2id['<pad>'] = 0
+        pos2id['<s>'] = 1
+        pos2id['</s>'] = 2
+        pos2id['<unk>'] = 3
+        pos2id['<b>'] = 4
+        for i, pos in enumerate(pos_vocab, start=5):
+            pos2id[pos] = i
+        return pos2id
 
     @staticmethod
     def from_corpus(corpus, size, freq_cutoff=2):

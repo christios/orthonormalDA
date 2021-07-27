@@ -33,6 +33,90 @@ def pad_sents_char(sents, char_pad_token, max_sent_length=None, max_word_length=
 
     return sents_padded
 
+def create_padded_segment_contexts(sents, pad_token, boundary_token, max_sent_length=None,  max_seg_per_token=None, max_seg_length=None, window_size=None):
+    """If max_seg_length stays `None`, then we are padding label arrays.
+    sents_padded: (a, b, c, d, e)
+        - a = number of sentences
+        - b = maximum number of tokens per sentence
+        - c = maximum number of segments per token
+        - d = 2 * window length + 1 (corresponds to one segment and its context)
+        - e = maximum number of characters per segment."""
+    max_seg_length = max_seg_length + \
+        1 if max_seg_length else max(len(seg)
+                                     for sent in sents for t in sent for seg in t) if max_seg_length else None
+    sents_padded = []
+    sent_lengths = [len(s) for s in sents]
+    max_sent_len = max_sent_length + 1 if max_sent_length else max(sent_lengths)
+    max_seg_per_token = max_seg_per_token if max_seg_per_token else max(
+        len(t) for sent in sents for t in sent)
+    for i, sent in enumerate(sents):
+        tokens_padded = []
+        k = 0
+        segments_with_boundaries = []
+        for token in sent:
+            for i, seg in enumerate(token):
+                segments_with_boundaries.append(seg)
+                if len(token) != 1 and i != len(token) - 1:
+                    if max_seg_length:
+                        segments_with_boundaries.append([boundary_token] * max_seg_length)
+                    else:
+                        segments_with_boundaries.append(boundary_token)
+        
+        for j, token in enumerate(sent):
+            token_segments = []
+            for _ in range(len(token)):
+                context = []
+                if max_seg_length:
+                    if segments_with_boundaries[k][0] == 4:
+                        k += 1
+                else:
+                    if segments_with_boundaries[k] == 4:
+                        k += 1
+                for seg_pos in range(k - window_size, k + window_size + 1):
+                    if seg_pos < 0 or seg_pos >= len(segments_with_boundaries):
+                        context.append([pad_token] * max_seg_length if max_seg_length else pad_token)
+                        continue
+                    seg = segments_with_boundaries[seg_pos]
+                    segment_padded = seg
+                    if max_seg_length:
+                        segment_padded = seg + [pad_token] * (max_seg_length - len(seg)) \
+                            if len(seg) < max_seg_length else seg[:max_seg_length]
+                    context.append(segment_padded)
+                token_segments.append(context)
+                k += 1
+            if max_seg_length:
+                pad_segments = [[[pad_token] * max_seg_length] * (2 * window_size + 1)] * \
+                    (max_seg_per_token - len(token_segments))
+            else:
+                pad_segments = [
+                    [pad_token] * (2 * window_size + 1)] * (max_seg_per_token - len(token_segments))
+            tokens_padded.append(token_segments + pad_segments)
+        
+        if max_seg_length:
+            pad_tokens = [[[[pad_token] * max_seg_length] * (
+                2 * window_size + 1)] * max_seg_per_token] * (max_sent_len - len(tokens_padded))
+        else:
+            pad_tokens = [[[pad_token] * (
+                2 * window_size + 1)] * max_seg_per_token] * (max_sent_len - len(tokens_padded))
+        sents_padded.append(tokens_padded + pad_tokens)
+
+    return sents_padded
+
+def create_windows(sents_padded, window_size, pad_token):
+    for sent in sents_padded:
+        tokens_concat = sent
+        for target_token_index in range(len(sent)):
+            for target_seg_index in range(len(sent[target_token_index])):
+                context = []
+                for seg_pos in range(target_seg_index - window_size, target_seg_index + window_size + 1):
+                    if seg_pos < 0 or seg_pos >= len(sent):
+                        context.append(pad_token)
+                        continue
+                    segment = sent[target_token_index][target_seg_index]
+                    context.append(segment)
+                
+
+    
 
 def pad_sents(sents, pad_token, maxlen):
     """ Pad list of sentences according to the longest sentence in the batch.

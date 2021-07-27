@@ -13,36 +13,32 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.tensorboard import SummaryWriter
 
 from spell_correct.vocab import Vocab
-from spell_correct.spelling_corrector import SpellingCorrector
 from spell_correct.pos_tagger import POSTagger
-from spell_correct.eval_metric import Evaluation
-from spell_correct.dialect_data import load_data, process_raw_inputs
+from spell_correct.dialect_data import load_data, preprocess
 
 
-class SpellCorrectTrainer:
-    def __init__(self, args) -> None:
+class Trainer:
+    def __init__(self, args, vocab) -> None:
         self.args = args
-        # self.device = torch.device(
-        #     f'cuda:{args.gpu_index}' if torch.cuda.is_available() else 'cpu')
-        self.device = torch.device('cpu')
-        self.vocab = Vocab.load(args.vocab_path)
+        self.device = torch.device(
+            f'cuda:{args.gpu_index}' if torch.cuda.is_available() else 'cpu')
+        # self.device = torch.device('cpu')
+        self.vocab = vocab
 
-        self.train_iter, self.dev_iter =  load_data(args, self.vocab, self.device)
+        self.train_iter, self.dev_iter, self.annotations = load_data(
+            args, self.vocab, self.device, args.load)
         self.model = POSTagger(args,
-                                       vocab=self.vocab,
-                                       bert_tokenizer=self.train_iter.dataset.bert_tokenizer,
-                                       device=self.device).to(self.device)
+                               vocab=self.vocab,
+                               bert_tokenizer=self.dev_iter.dataset.bert_tokenizer,
+                               device=self.device).to(self.device)
 
-        self.criterion_char = nn.CrossEntropyLoss(
+        self.criterion = nn.CrossEntropyLoss(
             ignore_index=self.vocab.tgt.char2id['<pad>'])
-        self.optimizer = optim.Adam(self.model.parameters())
-        self.scheduler = ReduceLROnPlateau(self.optimizer, 'min', patience=5, factor=0.5)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=1e-3)
+        self.scheduler = ReduceLROnPlateau(
+            self.optimizer, 'min', patience=5, factor=0.5)
         self.writer = SummaryWriter(os.path.join(args.logs, 'tensorboard'))
 
-        self.src_to_tgt = np.vectorize(
-            lambda x: self.vocab.tgt.char2id[self.vocab.src.id2char[x]])
-
-    
     @staticmethod
     def epoch_time(start_time: int,
                    end_time: int):
@@ -51,76 +47,50 @@ class SpellCorrectTrainer:
         elapsed_secs = int(elapsed_time - (elapsed_mins * 60))
         return elapsed_mins, elapsed_secs
 
-
     def _compute_loss(self, outputs, tgt):
-        max_word_len = self.args.max_decode_len
-        tgt = tgt[:, :, 1:].reshape(-1, max_word_len)
-        tgt = tgt[torch.any(tgt.bool(), dim=1)]
+        max_word_len = self.args.max_word_len
+        tgt = tgt.reshape(-1, max_word_len + 1)
+        tgt = tgt[torch.any(tgt != self.vocab.src.char2id['<pad>'], dim=1)]
         outputs = outputs.view(-1, outputs.shape[-1])
         tgt = tgt.permute(1, 0).reshape(outputs.shape[0])
-        return self.criterion_char(outputs, tgt)
+        return self.criterion(outputs, tgt)
 
-
-    def _compute_word_accuracy_word_level(self, outputs_char, src, tgt):
-        predictions = outputs_char.argmax(-1).permute(1, 0)
-        tgt_perm = tgt[:, :, 1:]
-        tgt_perm = tgt_perm.reshape(-1, self.args.max_decode_len)
-        tgt_perm = tgt_perm[torch.any(tgt_perm.bool(), dim=1)]
-        src_perm = src[:, :, 1:]
-        src_perm = src_perm.reshape(-1, self.args.max_decode_len)
-        src_perm = src_perm[torch.any(src_perm.bool(), dim=1)]
-
-        resized_predictions = torch.cat(
-            [predictions, torch.zeros_like(tgt_perm)], dim=1)[:, :tgt_perm.shape[1]]
-        src_mapped_to_tgt = self.src_to_tgt(src_perm.detach().cpu().numpy())
-        src_mapped_to_tgt = torch.from_numpy(src_mapped_to_tgt).to(self.device)
-        
-        e_mask = torch.all(src_mapped_to_tgt == tgt_perm, dim=1)
-        ne_mask = torch.bitwise_not(e_mask)
-
-        total = 0
-        correct_total = [0, 0, 0, 0]
-        for i, mask in enumerate([e_mask, ne_mask]):
-            tgt_mask = tgt_perm[mask] != self.vocab.tgt['<pad>']
-            pred_valid = resized_predictions[mask] * tgt_mask
-            correct_forms = torch.all(tgt_perm[mask] == pred_valid, dim=1)
-            if i == 1:
-                ne_changed = torch.all(src_mapped_to_tgt[mask] == pred_valid, dim=1)
-            total_len = tgt_perm[mask].shape[0]
-            correct_len = torch.sum(correct_forms).item()
-            correct_total[i * 2] += correct_len
-            correct_total[i * 2 + 1] += total_len
-            total += total_len
-        correct_total.append(correct_total[-1] - torch.sum(ne_changed).item())
-        assert total == src_perm.shape[0]
-        return correct_total
-    
+    def _compute_accuracy(self, outputs, pos_labels):
+        outputs = torch.tensor(outputs, device=self.device)[:, self.args.window_size]
+        pos_labels = pos_labels.permute(1, 0)[:, self.args.window_size]
+        correct = torch.sum(pos_labels == outputs).item()
+        total = pos_labels.size(0)
+        return correct, total
 
     def train(self):
         metrics_train, metrics_val = {}, {}
         for epoch in range(self.args.epochs):
             self.model.train()
             print(f'Epoch {epoch+1}/{self.args.epochs}')
-            epoch_loss, epoch_loss_char  = 0, 0
+            epoch_loss = 0
             start_time = time.time()
             for iteration, batch in enumerate(self.train_iter):
-                tgt_char = batch['tgt_char']
-
                 self.model.zero_grad()
-                outputs_char = self.model(batch)
-                loss_char = self._compute_loss(outputs_char, tgt_char)
-                loss_char.backward()
+                output = self.model(batch, use_crf=self.args.use_crf)
+                if self.args.use_crf:
+                    loss = output['loss']
+                else:
+                    loss = self._compute_loss(
+                        output['lstm_feats'], batch['tgt_char'])
+
+                loss.backward()
                 self.optimizer.step()
-                epoch_loss += loss_char.item()
+                epoch_loss += loss.item()
                 if iteration and iteration % 10 == 0 and len(self.train_iter) - iteration > 10 \
                         or iteration + 1 == len(self.train_iter):
                     for param_group in self.optimizer.param_groups:
                         lr = param_group['lr']
                     print(
-                        f'Batch {iteration}/{len(self.train_iter)-1}\t| train_loss {loss_char.item():.7f} | lr {lr}')
-            metrics_train.setdefault('train_loss', []).append(epoch_loss / iteration)
+                        f'Batch {iteration}/{len(self.train_iter)-1}\t| train_loss {loss.item():.7f} | lr {lr}')
+            metrics_train.setdefault('train_loss', []).append(
+                epoch_loss / iteration)
             end_time = time.time()
-            epoch_mins, epoch_secs = SpellCorrectTrainer.epoch_time(
+            epoch_mins, epoch_secs = Trainer.epoch_time(
                 start_time, end_time)
             log_output = 'Evaluation...\n'
             metrics_val_step = self.evaluate()
@@ -131,7 +101,7 @@ class SpellCorrectTrainer:
                 f'Epoch {epoch+1}/{self.args.epochs} | Time: {epoch_mins}m {epoch_secs}s')
             for m, v in metrics.items():
                 log_output += (f"\t{m.ljust(25)}: {metrics[m][-1]:.7f}\n" if 'loss' in m
-                    else f"\t{m.ljust(25)}: {metrics[m][-1]:.1%}\n")
+                               else f"\t{m.ljust(25)}: {metrics[m][-1]:.1%}\n")
             print(log_output)
             self.scheduler.step(metrics['dev_loss'][-1])
 
@@ -142,62 +112,39 @@ class SpellCorrectTrainer:
 
         self.model.eval()
         with torch.no_grad():
-            # correct_e, total_e, correct_ne, total_ne
-            correct_total = [0, 0, 0, 0, 0]
+            correct, total = 0, 0
             epoch_loss = 0
             for batch in self.dev_iter:
-                # Loss
-                outputs_char = self.model(batch, teacher_force=False)
-                loss_char = self._compute_loss(outputs_char, batch['tgt_char'])
-                epoch_loss += loss_char.item()
-                # Accuracy - Word
-                correct_total_batch = self._compute_word_accuracy_word_level(
-                    outputs_char, batch['src_char'], batch['tgt_char'])
 
-                correct_total = [sum(x) for x in zip(correct_total, correct_total_batch)]
+                output = self.model(
+                    batch, use_crf=self.args.use_crf, decode=True)
+                if self.args.use_crf:
+                    loss = output['loss']
+                    accuracy = self._compute_accuracy(
+                        output['outputs'], output['pos_labels'])
+                    correct += accuracy[0]
+                    total += accuracy[1]
+                else:
+                    loss = self._compute_loss(
+                        output['lstm_feats'], batch['tgt_char'])
+                    outputs = output['lstm_feats'].argmax(-1).permute(1, 0)
+                    sensitivity_specificity_batch = self._compute_accuracy(
+                        outputs, batch['src_char'], batch['tgt_char'])
+                epoch_loss += loss.item()
 
         metrics = {}
-        metrics['dev_recall'] = (correct_total[0] + correct_total[4]) / (correct_total[1] + correct_total[3])
-        metrics['dev_precision'] = correct_total[2] / correct_total[3]
-        metrics['dev_f1'] = 2 * (metrics['dev_recall'] * metrics['dev_precision']) / (metrics['dev_recall'] + metrics['dev_precision'])
+        metrics['dev_accuracy'] = correct / total
         metrics['dev_loss'] = epoch_loss / len(self.dev_iter)
         return metrics
 
-    def predict(self, data=None):
-        if data:
-            iterator = process_raw_inputs(data)
-        else:
-            iterator = self.dev_iter
+    def predict(self):
         self.model.eval()
         with torch.no_grad():
-            for batch in iterator:
-                src = batch['src_char']
-                tgt = batch['tgt_char']
-                outputs, valid_indexes = self.model(
-                    batch, teacher_force=False, return_valid_indexes=True)
-                predictions = outputs.argmax(-1).permute(1, 0)
-                predictions = self.model._scatter(
-                    predictions, valid_indexes, tgt.shape)
-
-                matrices = [[], [], [], []]
-                for i, matrix in enumerate([src.permute(1, 0, 2), tgt.permute(1, 0, 2), predictions.permute(1, 0, 2)]):
-                    for sent in matrix:
-                        matrices[i].append([])
-                        for word in sent:
-                            if word[0].item() == self.vocab.src.char2id['<pad>']:
-                                break
-                            matrices[i][-1].append([])
-                            for char in word:
-                                if char.item() == self.vocab.src.char2id['</w>']:
-                                    break
-                                elif char.item() == self.vocab.src.char2id['<w>']:
-                                    continue
-                                matrices[i][-1][-1].append(
-                                    self.vocab.src.id2char[char.item()])
-                            matrices[i][-1][-1] = ''.join(matrices[i][-1][-1])
-                        if i == 0:
-                            matrices[3].append(' '.join(matrices[i][-1]))
-        return matrices
+            for batch in self.dev_iter:
+                output = self.model(
+                    batch, use_crf=self.args.use_crf, decode=True, output_loss=False)
+        return [seg[self.args.window_size] for seg in output['outputs']]
+            
 
     def label_predictions(self, predictions, raw_inputs, raw_golds):
         train_corpus = [
@@ -207,12 +154,11 @@ class SpellCorrectTrainer:
             labels.append([])
             for word_pred, word_raw_input, word_raw_gold in zip(pred, raw_input, raw_gold):
                 labels[-1].append(
-                    ('EQUAL' if word_raw_input == word_raw_gold else 'NOT EQUAL', 
+                    ('EQUAL' if word_raw_input == word_raw_gold else 'NOT EQUAL',
                      'CORRECT' if word_pred == word_raw_gold else 'INCORRECT',
                      'IN_TRAIN' if word_raw_input in train_corpus else ''))
         return labels
 
-    
     @staticmethod
     def find_mask_index(seq, s_type):
         mask_index = torch.where(seq == s_type)[0]
@@ -226,7 +172,10 @@ class SpellCorrectTrainer:
     def load_model(model_path: str):
         params = torch.load(model_path)
         args = params['args']
-        network = SpellCorrectTrainer(args)
+        args.load = True
+        args.train_split = 0
+        vocab = params['vocab']
+        network = Trainer(args, vocab)
         network.model.load_state_dict(params['state_dict'])
         return network
 
@@ -235,7 +184,8 @@ class SpellCorrectTrainer:
         print('Saving model parameters to [%s]\n' % save_path)
         params = {
             'args': self.args,
-            'state_dict': self.model.state_dict()
+            'state_dict': self.model.state_dict(),
+            'vocab': self.vocab
         }
         torch.save(params, save_path)
 
@@ -248,13 +198,11 @@ class SpellCorrectTrainer:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--batch_size", default=8,
+    parser.add_argument("--batch_size", default=4,
                         type=int, help="Batch size.")
-    parser.add_argument("--epochs", default=25, type=int,
+    parser.add_argument("--epochs", default=13, type=int,
                         help="Number of epochs.")
     parser.add_argument("--ce_dim", default=128, type=int,
-                        help="Word embedding dimension.")
-    parser.add_argument("--we_dim", default=256, type=int,
                         help="Word embedding dimension.")
     parser.add_argument("--rnn_dim_char", default=256,
                         type=int, help="RNN cell dimension.")
@@ -268,13 +216,19 @@ def main():
                         help="Proportion with which to split the train and dev data.")
     parser.add_argument("--max_sent_len", default=35, type=int,
                         help="Maximum length of BERT input sequence.")
+    parser.add_argument("--max_segments_per_sent", default=60, type=int,
+                        help="Maximum length of BERT input sequence.")
     parser.add_argument("--max_decode_len", default=25, type=int,
                         help="Maximum length of BERT input sequence.")
-    parser.add_argument("--dropout", default=0.2, type=float,
+    parser.add_argument("--dropout", default=0.1, type=float,
                         help="Probablility of dropout for encoder and decoder.")
     parser.add_argument("--use_bert_enc", default='',
                         help="How to use use BERT embeddings (either as initialization or as concatenated embeddings). Leave empty to exlcude embeddings",
                         choices=['init', 'concat', ''])
+    parser.add_argument("--window_size", default=7, type=int,
+                        help="How much context to the left and right of segment do we want to take (in number of segments).")
+    parser.add_argument("--use_crf", default=True, action='store_true',
+                        help="Whether or not we should add the CRF layer on top of the LSTM output.")
     parser.add_argument("--mode", default='pos_tagger',
                         help="Training mode.", choices=['pos_tagger', 'standardizer'])
     parser.add_argument("--gpu_index", default=6, type=int,
@@ -283,7 +237,7 @@ def main():
                         default="/local/ccayral/orthonormalDA1/data/coda-corpus/beirut_vocab.json", type=str,
                         help="Path to vocab JSON file.")
     parser.add_argument("--data",
-                        default="/local/ccayral/orthonormalDA1/data/asc/annotations_carine.json", type=str,
+                        default="/local/ccayral/orthonormalDA1/data/asc", type=str,
                         help="Path to file with src dataset.")
     parser.add_argument("--bert_cache_dir",
                         default="/local/ccayral/.transformer_models/MARBERT_pytorch_verison", type=str,
@@ -303,8 +257,9 @@ def main():
     parser.add_argument("--seed", default=42, type=int, help="Random seed.")
     args = parser.parse_args([] if "__file__" not in globals() else None)
 
-    # args.load = '/local/ccayral/orthonormalDA1/model_weights/train-2021-05-25_18:18:40-bs=8,cd=128,ds=10000,e=23,gi=6,mdl=25,msl=35,rd=512,rdc=256,rl=2,s=42,usl=False,wd=256.pt'
-    # args.use_bert_enc = 'init'
+    # args.load = '/local/ccayral/orthonormalDA1/model_weights/train_pos-2021-07-27_12:02:08-bs=4,cd=128,ds=10000,e=13,gi=6,mdl=25,msps=60,msl=35,rd=512,rdc=256,rl=2,s=42,uc=True,ws=7.pt'
+    # args.train_split = 0
+    # args.use_bert_enc = 'concat'
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -317,7 +272,8 @@ def main():
     )
     # error_analysis(args)
     if not args.load:
-        trainer = SpellCorrectTrainer(args)
+        vocab = Vocab.load(args.vocab_path)
+        trainer = Trainer(args, vocab)
         metrics = trainer.train()
         with open(os.path.join(args.config_save, args.logdir + '.json'), 'w') as f:
             json.dump(vars(args), f)
@@ -325,22 +281,27 @@ def main():
             json.dump(metrics, f)
         print(metrics)
     else:
-        trainer = SpellCorrectTrainer.load_model(args.load)
-        inputs, golds, predictions, sentences = trainer.predict()
-        labels = trainer.label_predictions(predictions, inputs, golds)
-        with open(os.path.join(args.logs, args.logdir), 'w') as f:
-            for p, i, g, s, l in zip(predictions, inputs, golds, sentences, labels):
-                for p_word, i_word, g_word, r_word in zip(p, i, g, l):
-                    # print(r_word[2], file=f, end='\t')
-                    # print(i_word, file=f, end='\t')
-                    # print(g_word, file=f, end='\t')
-                    print(p_word, file=f, end='\t')
-                    # print(f"{r_word[0]}\t{r_word[1]}", file=f, end='\t')
-                    # print(s, file=f)
+        trainer = Trainer.load_model(args.load)
+        pos_tags = trainer.predict()
+        predictions = list(zip([trainer.vocab.tgt.id2word[t] for t in pos_tags], [
+                       seg for sent in trainer.dev_iter.dataset.src_segments_raw for token in sent for seg in token]))
+        with open('/local/ccayral/orthonormalDA1/data/asc/annotations_carine.json') as f, \
+            open('/local/ccayral/orthonormalDA1/data/asc/annotations_carine_automatic.json', 'w') as a:
+            i = 0
+            annotations_ = []
+            for annotation in trainer.annotations:
+                for token in annotation['segments']:
+                    for segment in token:
+                        assert preprocess(segment['text']) == preprocess(predictions[i][1])
+                        segment['pos'] = predictions[i][0]
+                        i += 1
+                annotations_.append(annotation)
+            json.dump(annotations_, a)
+        pass
 
 
 def error_analysis(args):
-    trainer = SpellCorrectTrainer(args)
+    trainer = Trainer(args)
     with open('/local/ccayral/orthonormalDA1/logs/train-2021-05-22_10:34:44-bs=16,cd=128,ds=10000,e=20,gi=6,mdl=25,msl=35,rd=512,rdc=256,rl=1,s=42,ube=False,usl=False,wd=256') as f:
         e, ne = [], []
         for line in f:
@@ -358,8 +319,6 @@ def error_analysis(args):
             in_train += 1
     ratio = in_train / total
     pass
-
-
 
 
 if __name__ == '__main__':
