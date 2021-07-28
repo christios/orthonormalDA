@@ -16,10 +16,10 @@ from spell_correct.vocab import Vocab
 from spell_correct.pos_tagger import POSTagger
 from spell_correct.dialect_data import load_data, preprocess
 
-
 class Trainer:
     def __init__(self, args, vocab) -> None:
         self.args = args
+        self.features = args.features.split()
         self.device = torch.device(
             f'cuda:{args.gpu_index}' if torch.cuda.is_available() else 'cpu')
         # self.device = torch.device('cpu')
@@ -36,7 +36,7 @@ class Trainer:
             ignore_index=self.vocab.tgt.char2id['<pad>'])
         self.optimizer = optim.Adam(self.model.parameters(), lr=1e-3)
         self.scheduler = ReduceLROnPlateau(
-            self.optimizer, 'min', patience=5, factor=0.5)
+            self.optimizer, 'min', patience=0, factor=0.5)
         self.writer = SummaryWriter(os.path.join(args.logs, 'tensorboard'))
 
     @staticmethod
@@ -55,12 +55,30 @@ class Trainer:
         tgt = tgt.permute(1, 0).reshape(outputs.shape[0])
         return self.criterion(outputs, tgt)
 
-    def _compute_accuracy(self, outputs, pos_labels):
-        outputs = torch.tensor(outputs, device=self.device)[:, self.args.window_size]
-        pos_labels = pos_labels.permute(1, 0)[:, self.args.window_size]
-        correct = torch.sum(pos_labels == outputs).item()
-        total = pos_labels.size(0)
+    def _compute_accuracy(self, outputs, features_labels):
+        outputs = {f: torch.tensor(outputs[f], device=self.device)[
+            :, self.args.window_size] for f in outputs}
+        features_labels = {f: features_labels[f].permute(
+            1, 0)[:, self.args.window_size] for f in features_labels}
+        correct = {f: torch.sum(features_labels[f] == outputs[f]).item()
+                   for f in features_labels}
+        total = {f: features_labels[f].size(0) for f in features_labels}
         return correct, total
+
+    def _compute_precision_recall(self, outputs, features_labels):
+        outputs = {f: torch.tensor(outputs[f], device=self.device)[
+            :, self.args.window_size] for f in outputs}
+        features_labels = {f: features_labels[f].permute(
+            1, 0)[:, self.args.window_size] for f in features_labels}
+        not_na_mask = {f: features_labels[f] != getattr(
+            self.vocab, f).word2id['NA'] for f in features_labels}
+        not_na_outputs = {f: outputs[f] != getattr(self.vocab, f).word2id['NA']
+                          for f in outputs}
+        recall = {f: (torch.sum(not_na_mask[f] & not_na_outputs[f]) / torch.sum(not_na_mask[f])).item()
+                  for f in features_labels}
+        precision = {f: (torch.sum((features_labels[f] == outputs[f]) * not_na_mask[f]) / torch.sum(not_na_mask[f])).item()
+                     for f in features_labels}
+        return precision, recall
 
     def train(self):
         metrics_train, metrics_val = {}, {}
@@ -100,8 +118,17 @@ class Trainer:
             print(
                 f'Epoch {epoch+1}/{self.args.epochs} | Time: {epoch_mins}m {epoch_secs}s')
             for m, v in metrics.items():
-                log_output += (f"\t{m.ljust(25)}: {metrics[m][-1]:.7f}\n" if 'loss' in m
-                               else f"\t{m.ljust(25)}: {metrics[m][-1]:.1%}\n")
+                if 'precision' in m or 'recall' in m:
+                    continue
+                elif 'loss' in m:
+                    log_output += f"\t{m.ljust(25)}: {metrics[m][-1]:.7f}\n" 
+                elif 'f1score' in m:
+                    f = m[4:-8]
+                    precision = metrics[f'dev_{f}_precision'][-1]
+                    recall = metrics[f'dev_{f}_recall'][-1]
+                    log_output += f"\t{m.ljust(25)}: {metrics[m][-1]:.1%}  {precision:.1%}  {recall:.1%}\n"
+                else:
+                    log_output += f"\t{m.ljust(25)}: {metrics[m][-1]:.1%}\n"
             print(log_output)
             self.scheduler.step(metrics['dev_loss'][-1])
 
@@ -109,10 +136,14 @@ class Trainer:
         return metrics
 
     def evaluate(self):
-
+        constant_features = ['pos']
+        grammatical_features = [f for f in self.features if f not in constant_features]
         self.model.eval()
         with torch.no_grad():
-            correct, total = 0, 0
+            correct, total = {f: 0 for f in constant_features}, {
+                f: 0 for f in constant_features}
+            precision, recall = {f: 0 for f in grammatical_features}, {
+                f: 0 for f in grammatical_features}
             epoch_loss = 0
             for batch in self.dev_iter:
 
@@ -120,10 +151,18 @@ class Trainer:
                     batch, use_crf=self.args.use_crf, decode=True)
                 if self.args.use_crf:
                     loss = output['loss']
-                    accuracy = self._compute_accuracy(
-                        output['outputs'], output['pos_labels'])
-                    correct += accuracy[0]
-                    total += accuracy[1]
+                    c, t = self._compute_accuracy(
+                        {k: v for k, v in output['outputs'].items() if k in constant_features},
+                        {k: v for k, v in output['features_labels'].items() if k in constant_features})
+                    p, r = self._compute_precision_recall(
+                        {k: v for k, v in output['outputs'].items() if k in grammatical_features},
+                        {k: v for k, v in output['features_labels'].items() if k in grammatical_features})
+                    for f in constant_features:
+                        correct[f] += c[f]
+                        total[f] += t[f]
+                    for f in grammatical_features:
+                        precision[f] += p[f]
+                        recall[f] += r[f]
                 else:
                     loss = self._compute_loss(
                         output['lstm_feats'], batch['tgt_char'])
@@ -133,7 +172,12 @@ class Trainer:
                 epoch_loss += loss.item()
 
         metrics = {}
-        metrics['dev_accuracy'] = correct / total
+        for f in constant_features:
+            metrics[f'dev_{f}_accuracy'] = correct[f] / total[f]
+        for f in grammatical_features:
+            metrics[f'dev_{f}_precision'] = precision[f]
+            metrics[f'dev_{f}_recall'] = recall[f] 
+            metrics[f'dev_{f}_f1score'] = 2 * (precision[f] * recall[f]) / (precision[f] + recall[f]) if precision[f] + recall[f] else 0
         metrics['dev_loss'] = epoch_loss / len(self.dev_iter)
         return metrics
 
@@ -143,7 +187,10 @@ class Trainer:
             for batch in self.dev_iter:
                 output = self.model(
                     batch, use_crf=self.args.use_crf, decode=True, output_loss=False)
-        return [seg[self.args.window_size] for seg in output['outputs']]
+        features_tags = {}
+        for f in self.features:
+            features_tags[f] = [seg[self.args.window_size] for seg in output['outputs'][f]]
+        return features_tags
             
 
     def label_predictions(self, predictions, raw_inputs, raw_golds):
@@ -200,7 +247,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch_size", default=4,
                         type=int, help="Batch size.")
-    parser.add_argument("--epochs", default=13, type=int,
+    parser.add_argument("--epochs", default=12, type=int,
                         help="Number of epochs.")
     parser.add_argument("--ce_dim", default=128, type=int,
                         help="Word embedding dimension.")
@@ -229,6 +276,9 @@ def main():
                         help="How much context to the left and right of segment do we want to take (in number of segments).")
     parser.add_argument("--use_crf", default=True, action='store_true',
                         help="Whether or not we should add the CRF layer on top of the LSTM output.")
+    parser.add_argument('--features', nargs='+',
+                        default='pos state number gender person voice mood aspect verbForm',
+                        help='Grammatical features that we are training for')
     parser.add_argument("--mode", default='pos_tagger',
                         help="Training mode.", choices=['pos_tagger', 'standardizer'])
     parser.add_argument("--gpu_index", default=6, type=int,
@@ -257,7 +307,7 @@ def main():
     parser.add_argument("--seed", default=42, type=int, help="Random seed.")
     args = parser.parse_args([] if "__file__" not in globals() else None)
 
-    # args.load = '/local/ccayral/orthonormalDA1/model_weights/train_pos-2021-07-27_12:02:08-bs=4,cd=128,ds=10000,e=13,gi=6,mdl=25,msps=60,msl=35,rd=512,rdc=256,rl=2,s=42,uc=True,ws=7.pt'
+    # args.load = '/local/ccayral/orthonormalDA1/model_weights/train_pos-2021-07-27_21:19:57-bs=4,cd=128,ds=10000,e=12,gi=6,mdl=25,msps=60,msl=35,rd=512,rdc=256,rl=2,s=42,uc=True,ws=7.pt'
     # args.train_split = 0
     # args.use_bert_enc = 'concat'
 
@@ -282,21 +332,16 @@ def main():
         print(metrics)
     else:
         trainer = Trainer.load_model(args.load)
-        pos_tags = trainer.predict()
-        predictions = list(zip([trainer.vocab.tgt.id2word[t] for t in pos_tags], [
-                       seg for sent in trainer.dev_iter.dataset.src_segments_raw for token in sent for seg in token]))
-        with open('/local/ccayral/orthonormalDA1/data/asc/annotations_carine.json') as f, \
-            open('/local/ccayral/orthonormalDA1/data/asc/annotations_carine_automatic.json', 'w') as a:
-            i = 0
-            annotations_ = []
-            for annotation in trainer.annotations:
-                for token in annotation['segments']:
-                    for segment in token:
-                        assert preprocess(segment['text']) == preprocess(predictions[i][1])
-                        segment['pos'] = predictions[i][0]
-                        i += 1
-                annotations_.append(annotation)
-            json.dump(annotations_, a)
+        features_tags = trainer.predict()
+        predictions = []
+        for seg_text in [
+            seg for sent in trainer.dev_iter.dataset.src_segments_raw for token in sent for seg in token]:
+            predictions.append({'text': seg_text})
+        for i, pred in enumerate(predictions):
+            for f in trainer.features:
+                tag = getattr(trainer.vocab, f).id2word[features_tags[f][i]]
+                pred[f] = tag
+        write_automatic_annotations(trainer, predictions)
         pass
 
 
@@ -320,6 +365,58 @@ def error_analysis(args):
     ratio = in_train / total
     pass
 
+def write_automatic_annotations(trainer, predictions):
+    feature_values = {'aspect': ['P', 'I', 'C', 'NONE'],
+                        'voice': ['A', 'P', 'NONE'],
+                        'mood': ['S', 'I', 'J', 'NONE'],
+                        'person': ['1', '2', '3', 'NONE'],
+                        'gender': ['M', 'F', 'NONE'],
+                        'number': ['S', 'D', 'P', 'NONE'],
+                        'state': ['D', 'I', 'C', 'NONE'],
+                        'nounForm': ['NONE'],
+                        'verbForm': ["فَعَل", "فَعَّل", "فاعَل", "أفْعَل", "تَفَعَّل", "تَفاعَل", "اِنْفَعَل", "اِفْتَعَل", "اِفْعَل", "اِسْتَفْعَل", "اِفْعَال", "اِفْعَوْعَل", "اِفْعَوَّل", "فَعْلَل", "فَعْفَع", "فَعْوَعل", "فَعْفَل"]
+                        }
+    pos_features = {'ABBREV': ['aspect', 'voice', 'mood', 'person', 'gender', 'number', 'state', 'nounForm', 'verbForm'],
+                    'ADJ': ['gender', 'number'],
+                    'NOUN': ['gender', 'number', 'state', 'nounForm'],
+                    'PRON': ['person', 'gender', 'number'],
+                    'VERB': ['aspect', 'voice', 'mood', 'person', 'gender', 'number', 'verbForm']}
+
+    def set_to_none(pos):
+        if f not in pos_features[pos]:
+            segment[f] = 'NA'
+        else:
+            if predictions[i][f] not in feature_values[f]:
+                segment[f] = 'NONE'
+            else:
+                segment[f] = predictions[i][f]
+    
+    i = 0
+    annotations_ = []
+    for annotation in trainer.annotations:
+        for token in annotation['segments']:
+            for segment in token:
+                assert preprocess(segment['text']) == preprocess(predictions[i]['text'])
+                predictions[i]['nounForm'] = 'NA'
+                predictions[i]['verbForm'] = 'NA'
+                segment['pos'] = predictions[i]['pos']
+                for f in [f for f in trainer.features if f != 'pos'] +['nounForm', 'verbForm']:
+                    if predictions[i]['pos'] == 'ABBREV':
+                        set_to_none('ABBREV')
+                    elif predictions[i]['pos'].startswith('ADJ'):
+                        set_to_none('ADJ')
+                    elif predictions[i]['pos'].startswith('NOUN'):
+                        set_to_none('NOUN')
+                    elif predictions[i]['pos'].startswith('PRON'):
+                        set_to_none('PRON')
+                    elif predictions[i]['pos'].startswith('VERB'):
+                        set_to_none('VERB')
+                    else:
+                        segment[f] = 'NA'
+                i += 1
+        annotations_.append(annotation)
+    with open('/local/ccayral/orthonormalDA1/data/asc/annotations_carine_automatic.json', 'w') as a:
+        json.dump(annotations_, a)
 
 if __name__ == '__main__':
     main()

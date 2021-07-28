@@ -189,7 +189,7 @@ class VocabEntry(object):
         return torch.t(sents_var)
 
     @staticmethod
-    def build_pos_vocab(sents: List[List[List[str]]]):
+    def build_feature_vocab(sents: List[List[List[str]]]):
         pos_vocab = Counter()
         for sent in sents:
             for token in sent:

@@ -23,6 +23,7 @@ class POSTagger(nn.Module):
         self.vocab = vocab
         self.device = device
         self.bert_tokenizer = bert_tokenizer
+        self.features = args.features.split()
 
         if args.use_bert_enc:
             self.bert_encoder = AutoModel.from_pretrained(
@@ -46,7 +47,7 @@ class POSTagger(nn.Module):
                                dropout=args.dropout)
 
         self.bi_lstm_crf = BiLSTM_CRF(input_dim=args.rnn_dim_char + bert_emb_dim,
-                                      num_tags=len(vocab.tgt.word2id),
+                                      num_tags={f: len(getattr(vocab, f)) for f in self.features},
                                       bert_emb_dim=0,
                                       rnn_dim=args.rnn_dim,
                                       num_layers=args.rnn_layers,
@@ -67,7 +68,7 @@ class POSTagger(nn.Module):
            - teacher_forcing_ratio is probability to use teacher forcing
             e.g. if teacher_forcing_ratio is 0.75 we use teacher forcing 75% of the time"""
         src_segments: Tensor = batch['src_segments']
-        pos_labels: Tensor = batch['pos_labels']
+        features_labels: Tensor = batch['features_labels']
         if batch.get('src_bert') is not None:
             src_bert: Optional[List[str]] = batch['src_bert']
             src_bert_mask: Optional[List[int]] = batch['src_bert_mask']
@@ -92,10 +93,10 @@ class POSTagger(nn.Module):
         else:
             segments = hidden[0]
         word_embeddings = self._scatter(segments, src_indexes_valid, src_segments.shape)
-        processed_inputs = self._process_input_bi_lstm_crf(word_embeddings, pos_labels)
+        processed_inputs = self._process_input_bi_lstm_crf(word_embeddings, features_labels)
         word_embeddings_valid = processed_inputs['word_embeddings_valid']
-        pos_labels_valid = processed_inputs['pos_labels_valid']
-        output = self.bi_lstm_crf(word_embeddings_valid, pos_labels_valid, decode, output_loss, use_crf)
+        features_labels_valid = processed_inputs['features_labels_valid']
+        output = self.bi_lstm_crf(word_embeddings_valid, features_labels_valid, decode, output_loss, use_crf)
         return output
 
     def _process_char_word_embeddings(self,
@@ -135,7 +136,7 @@ class POSTagger(nn.Module):
 
         return processed_inputs
 
-    def _process_input_bi_lstm_crf(self, word_embeddings, pos_labels):
+    def _process_input_bi_lstm_crf(self, word_embeddings, features_labels):
         batch_size = word_embeddings.size(0)
         max_sent_len = word_embeddings.size(1)
         max_token_len = word_embeddings.size(2)
@@ -143,17 +144,20 @@ class POSTagger(nn.Module):
         embedd_size = word_embeddings.size(4)
         contexts = batch_size * max_sent_len * max_token_len
         
-        pos_labels_batch = pos_labels.reshape(contexts, context_size)
-        valid_indexes = torch.any(pos_labels_batch != self.pad_token_idx, dim=1)
-        pos_labels_valid = pos_labels_batch[valid_indexes]
-        pos_labels_valid = pos_labels_valid.permute(1, 0)
+        features_labels_valid = {}
+        for feature in self.features:
+            feature_labels_batch = features_labels[feature].reshape(contexts, context_size)
+            valid_indexes = torch.any(feature_labels_batch != self.pad_token_idx, dim=1)
+            feature_labels_valid = feature_labels_batch[valid_indexes]
+            feature_labels_valid = feature_labels_valid.permute(1, 0)
+            features_labels_valid[feature] = feature_labels_valid
         
         word_embeddings_batch = word_embeddings.reshape(contexts, context_size, embedd_size)
         word_embeddings_valid = word_embeddings_batch[valid_indexes]
         word_embeddings_valid = word_embeddings_valid.permute(1, 0, 2)
 
         processed_inputs = dict(word_embeddings_valid=word_embeddings_valid,
-                                pos_labels_valid=pos_labels_valid,
+                                features_labels_valid=features_labels_valid,
                                 valid_indexes=valid_indexes)
 
         return processed_inputs

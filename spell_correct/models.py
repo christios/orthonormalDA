@@ -216,16 +216,22 @@ class BiLSTM_CRF(nn.Module):
                             num_layers=num_layers)
         self.dropout = nn.Dropout(dropout)
         self.device = device
-        self.crf_layer = CRF(num_tags=num_tags)
-
+        self.features_crf = {}
+        for f, num in num_tags.items():
+            setattr(self, f'{f}_crf', CRF(num_tags=num))
+            self.features_crf[f] = getattr(self, f'{f}_crf')
+            
         # Maps the output of the LSTM into tag space.
         self.f0 = nn.Linear(rnn_dim * 2, rnn_dim)
         self.f1 = nn.Linear(rnn_dim, rnn_dim // 2)
-        self.f1_to_tag = nn.Linear(rnn_dim // 2, num_tags)
+        self.f1_to_tag = {}
+        for f, num in num_tags.items():
+            setattr(self, f'{f}_f1_to_tag', nn.Linear(rnn_dim // 2, num))
+            self.f1_to_tag[f] = getattr(self, f'{f}_f1_to_tag')
 
     def forward(self,
                 src_segments,
-                pos_labels,
+                features_labels,
                 decode=False,
                 output_loss=True,
                 use_crf=True,
@@ -250,15 +256,19 @@ class BiLSTM_CRF(nn.Module):
 
         outputs, _ = self.lstm(embedded, bert_encodings)
         #outputs = [src_len, batch_size, rnn_dim * 2] because 2 directions
-        lstm_feats = self.f1_to_tag(self.f1(self.f0(outputs)))
+        features_lstm_feats = {f: self.f1_to_tag[f](self.f1(self.f0(outputs))) for f in self.num_tags}
         if use_crf:
             outputs, loss = None, None
             if decode:
-                outputs = self.crf_layer.decode(lstm_feats)
+                outputs = {f: crf.decode(features_lstm_feats[f])
+                           for f, crf in self.features_crf.items()}
             if output_loss:
-                loss = - self.crf_layer(lstm_feats, pos_labels)
-            output = dict(lstm_feats=lstm_feats, loss=loss, outputs=outputs, pos_labels=pos_labels)
+                loss = - sum(crf(features_lstm_feats[f], features_labels[f])
+                             for f, crf in self.features_crf.items()) / len(self.features_crf)
+            output = dict(lstm_feats=features_lstm_feats, loss=loss,
+                          outputs=outputs, features_labels=features_labels)
 
         else:
-            output = dict(lstm_feats=lstm_feats, loss=None, outputs=None)
+            output = dict(lstm_feats=features_lstm_feats,
+                          loss=None, outputs=None)
         return output
