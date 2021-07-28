@@ -13,6 +13,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.tensorboard import SummaryWriter
 
 from spell_correct.vocab import Vocab
+from spell_correct.spelling_corrector import SpellingCorrector
 from spell_correct.pos_tagger import POSTagger
 from spell_correct.dialect_data import load_data, preprocess
 
@@ -34,6 +35,8 @@ class Trainer:
 
         self.criterion = nn.CrossEntropyLoss(
             ignore_index=self.vocab.tgt.char2id['<pad>'])
+        self.criterion_char = nn.CrossEntropyLoss(
+            ignore_index=self.vocab.tgt.char2id['<pad>'])
         self.optimizer = optim.Adam(self.model.parameters(), lr=1e-3)
         self.scheduler = ReduceLROnPlateau(
             self.optimizer, 'min', patience=0, factor=0.5)
@@ -54,6 +57,14 @@ class Trainer:
         outputs = outputs.view(-1, outputs.shape[-1])
         tgt = tgt.permute(1, 0).reshape(outputs.shape[0])
         return self.criterion(outputs, tgt)
+
+    def _compute_loss_spell_correct(self, outputs, tgt):
+        max_word_len = self.args.max_decode_len
+        tgt = tgt[:, :, 1:].reshape(-1, max_word_len)
+        tgt = tgt[torch.any(tgt.bool(), dim=1)]
+        outputs = outputs.view(-1, outputs.shape[-1])
+        tgt = tgt.permute(1, 0).reshape(outputs.shape[0])
+        return self.criterion_char(outputs, tgt)
 
     def _compute_accuracy(self, outputs, features_labels):
         outputs = {f: torch.tensor(outputs[f], device=self.device)[
@@ -92,10 +103,13 @@ class Trainer:
                 output = self.model(batch, use_crf=self.args.use_crf)
                 if self.args.use_crf:
                     loss = output['loss']
+                    # loss = 0
                 else:
                     loss = self._compute_loss(
                         output['lstm_feats'], batch['tgt_char'])
-
+                # outputs_char = self.model(batch)
+                # loss_char = self._compute_loss_spell_correct(outputs_char, batch['tgt_char'])
+                # loss += loss_char
                 loss.backward()
                 self.optimizer.step()
                 epoch_loss += loss.item()
@@ -263,8 +277,6 @@ def main():
                         help="Proportion with which to split the train and dev data.")
     parser.add_argument("--max_sent_len", default=35, type=int,
                         help="Maximum length of BERT input sequence.")
-    parser.add_argument("--max_segments_per_sent", default=60, type=int,
-                        help="Maximum length of BERT input sequence.")
     parser.add_argument("--max_decode_len", default=25, type=int,
                         help="Maximum length of BERT input sequence.")
     parser.add_argument("--dropout", default=0.1, type=float,
@@ -278,6 +290,7 @@ def main():
                         help="Whether or not we should add the CRF layer on top of the LSTM output.")
     parser.add_argument('--features', nargs='+',
                         default='pos state number gender person voice mood aspect verbForm',
+                        # default='pos',
                         help='Grammatical features that we are training for')
     parser.add_argument("--mode", default='pos_tagger',
                         help="Training mode.", choices=['pos_tagger', 'standardizer'])

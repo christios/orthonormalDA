@@ -35,7 +35,7 @@ class POSTagger(nn.Module):
             self.rel = nn.ReLU()
             for param in self.bert_encoder.parameters():
                 param.requires_grad = False
-        bert_emb_dim = self.bert_encoder.config.hidden_size if args.use_bert_enc == 'concat' else 0
+        self.bert_emb_dim = self.bert_encoder.config.hidden_size if args.use_bert_enc else 0
 
         self.pad_token_idx = vocab.src.char2id['<pad>']
 
@@ -46,7 +46,7 @@ class POSTagger(nn.Module):
                                num_layers=1,
                                dropout=args.dropout)
 
-        self.bi_lstm_crf = BiLSTM_CRF(input_dim=args.rnn_dim_char + bert_emb_dim,
+        self.bi_lstm_crf = BiLSTM_CRF(input_dim=args.rnn_dim_char + self.bert_emb_dim,
                                       num_tags={f: len(getattr(vocab, f)) for f in self.features},
                                       bert_emb_dim=0,
                                       rnn_dim=args.rnn_dim,
@@ -68,6 +68,7 @@ class POSTagger(nn.Module):
            - teacher_forcing_ratio is probability to use teacher forcing
             e.g. if teacher_forcing_ratio is 0.75 we use teacher forcing 75% of the time"""
         src_segments: Tensor = batch['src_segments']
+        segments_per_token: Tensor = batch['segments_per_token']
         features_labels: Tensor = batch['features_labels']
         if batch.get('src_bert') is not None:
             src_bert: Optional[List[str]] = batch['src_bert']
@@ -78,7 +79,7 @@ class POSTagger(nn.Module):
         # processed_inputs = self._process_inputs(
         #     src_char, src_bert, src_bert_mask, tgt_char)
         processed_segments = self._process_char_word_embeddings(
-            src_segments, src_bert, src_bert_mask)
+            src_segments, segments_per_token, src_bert, src_bert_mask)
         # src_char_valid -> [max_len_src_char + 1, batch_size_char]
         src_char_valid = processed_segments['src_char_valid']
         src_indexes_valid = processed_segments['src_indexes_valid']
@@ -86,21 +87,23 @@ class POSTagger(nn.Module):
         lengths_char_src = processed_segments['lengths_char_src']
         bert_encodings = processed_segments['bert_encodings']
 
-        _, hidden, _ = self.encoder(
-            src_char_valid, lengths_char_src)
-        if bert_encodings is not None:
-            segments = torch.cat([hidden[0], bert_encodings], dim=1)
-        else:
-            segments = hidden[0]
+        _, hidden, _ = self.encoder(src_char_valid, lengths_char_src)
+        
+        segments = hidden[0]
         word_embeddings = self._scatter(segments, src_indexes_valid, src_segments.shape)
-        processed_inputs = self._process_input_bi_lstm_crf(word_embeddings, features_labels)
+        processed_inputs = self._process_input_bi_lstm_crf(word_embeddings, features_labels, segments_per_token, bert_encodings)
         word_embeddings_valid = processed_inputs['word_embeddings_valid']
         features_labels_valid = processed_inputs['features_labels_valid']
+        bert_encodings = processed_inputs['bert_encodings']
+        if bert_encodings is not None:
+            word_embeddings_valid = torch.cat(
+                [word_embeddings_valid, bert_encodings], dim=-1)
         output = self.bi_lstm_crf(word_embeddings_valid, features_labels_valid, decode, output_loss, use_crf)
         return output
 
     def _process_char_word_embeddings(self,
                                       src_segments,
+                                      segments_per_token,
                                       src_bert=None,
                                       src_bert_mask=None,
                                       use_cache=False):
@@ -120,14 +123,11 @@ class POSTagger(nn.Module):
                     self.word_to_char_bert(logits_words_valid))
             bert_encodings = logits_words_valid
 
-        valid_segments = self._get_valid_segments(src_segments, bert_encodings)
+        valid_segments = self._get_valid_segments(src_segments, segments_per_token, bert_encodings)
         src_char_valid = valid_segments['src_char_valid']
         src_indexes_valid = valid_segments['valid_indexes']
         lengths_char_src = valid_segments['lengths_char_src']
         bert_encodings = valid_segments['bert_encodings']
-        
-        if self.args.use_bert_enc == 'concat':
-            assert bert_encodings.size(0) == src_char_valid.size(1)
 
         processed_inputs = dict(src_char_valid=src_char_valid,
                                 src_indexes_valid=src_indexes_valid,
@@ -136,7 +136,11 @@ class POSTagger(nn.Module):
 
         return processed_inputs
 
-    def _process_input_bi_lstm_crf(self, word_embeddings, features_labels):
+    def _process_input_bi_lstm_crf(self,
+                                   word_embeddings,
+                                   features_labels,
+                                   segments_per_token,
+                                   bert_encodings=None):
         batch_size = word_embeddings.size(0)
         max_sent_len = word_embeddings.size(1)
         max_token_len = word_embeddings.size(2)
@@ -152,30 +156,33 @@ class POSTagger(nn.Module):
             feature_labels_valid = feature_labels_valid.permute(1, 0)
             features_labels_valid[feature] = feature_labels_valid
         
+        if bert_encodings is not None:
+            bert_encodings = self._map_context_to_bert(segments_per_token, bert_encodings)
+        
         word_embeddings_batch = word_embeddings.reshape(contexts, context_size, embedd_size)
         word_embeddings_valid = word_embeddings_batch[valid_indexes]
         word_embeddings_valid = word_embeddings_valid.permute(1, 0, 2)
 
         processed_inputs = dict(word_embeddings_valid=word_embeddings_valid,
                                 features_labels_valid=features_labels_valid,
-                                valid_indexes=valid_indexes)
+                                valid_indexes=valid_indexes,
+                                bert_encodings=bert_encodings)
 
         return processed_inputs
 
-    def _get_valid_segments(self, src_segments, bert_encodings=None):
+    def _get_valid_segments(self,
+                            src_segments,
+                            segments_per_token,
+                            bert_encodings=None):
         bert_encodings_ = None
         if bert_encodings is not None:
             bert_encodings_ = []
             i = 0
-            for sent in src_segments:
-                for token in sent:
-                    if torch.any(token):
-                        for seg in token:
-                            if torch.any(seg):
-                                for context_seg in seg:
-                                    if torch.any(context_seg):
-                                        bert_encodings_.append(bert_encodings[i])
-                                i += 1
+            for sent in segments_per_token:
+                for seg_per_tok in sent:
+                    for _ in range(seg_per_tok):
+                        bert_encodings_.append(bert_encodings[i])
+                    i += 1
             bert_encodings_ = torch.stack(bert_encodings_).to(self.device)
 
         src_char_debatch = src_segments.reshape(-1, src_segments.size(-1))
@@ -251,3 +258,36 @@ class POSTagger(nn.Module):
                 [logits_words_[-1], torch.zeros(logits_words.shape[1:], device=self.device)], dim=0)[:logits_words.size(1) + 1, :]
         logits_words = torch.stack(logits_words_, dim=0).permute(1, 0, 2)
         return logits_words
+
+    def _map_context_to_bert(self, segments_per_token, bert_encodings):
+        context_to_bert = []
+        for idx, sent in enumerate(segments_per_token):
+            k = 0
+            i = 0
+            for token in sent:
+                for _ in range(token):
+                    context_to_bert.append([])
+                    j = 0
+                    for seg_pos in range(k - self.args.window_size, k + self.args.window_size + 1):
+                        if seg_pos < 0 or seg_pos >= sum(sent):
+                            context_to_bert[-1].append(-1)
+                            continue
+                        context_to_bert[-1].append(j + i +
+                                                   sum(sum(num_seg) for num_seg in segments_per_token[:idx]))
+                        j += 1
+                    if context_to_bert[-1][0] != -1:
+                        i += 1
+                    k += 1
+        
+        bert_encodings_ = []
+        for sent in context_to_bert:
+            bert_encodings_.append([])
+            for bert_index in sent:
+                if bert_index == -1:
+                    bert_encodings_[-1].append(torch.zeros((self.bert_emb_dim,), dtype=bert_encodings.dtype, device=self.device))
+                else:
+                    bert_encodings_[-1].append(bert_encodings[bert_index])
+            bert_encodings_[-1] = torch.stack(bert_encodings_[-1])
+        bert_encodings_ = torch.stack(bert_encodings_)
+        
+        return bert_encodings_.permute(1, 0, 2)

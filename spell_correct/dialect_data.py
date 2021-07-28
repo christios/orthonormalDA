@@ -36,6 +36,8 @@ class DialectData(Dataset):
         self.tgt_raw = [f[i] for f in data]
         i += 1
         self.src_segments_raw = [f[i] for f in data]
+        self.segments_per_token = [
+            [len(token) for token in sent] for sent in self.src_segments_raw]
         i += 1
         self.src_char = [f[i] for f in data]
         self.src_char = pad_sents_char(self.src_char,
@@ -51,9 +53,9 @@ class DialectData(Dataset):
         i += 1
         assert len(self.src_raw) == len(self.tgt_raw) == len(self.src_char) == len(self.tgt_char)
         if args.use_bert_enc:
-            self.src_bert = [f[4] for f in data]
+            self.src_bert = [f[i] for f in data]
             i += 1
-            self.src_bert_mask = [f[5] for f in data]
+            self.src_bert_mask = [f[i] for f in data]
             i += 1
             assert len(self.src_raw) == len(self.src_bert) == len(self.src_bert_mask)
 
@@ -78,23 +80,6 @@ class DialectData(Dataset):
                                                                           window_size=args.window_size))
                 i += 1
                 assert len(self.tgt_char) == len(getattr(self, feature))
-        
-        # if args.use_bert_enc:
-        #     bert_encodings = []
-        #     for sent in self.src_segments:
-        #         bert_encodings.append([])
-        #         for token in sent:
-        #             for seg in token:
-        #                 if any([char for context_seg in seg for char in context_seg]):
-        #                     for context_seg in seg:
-        #                         pass
-
-        #     src_bert = self.bert_tokenizer([' '.join([' '.join(token) for token in sent]) for sent in asc['src_segments']],
-        #                                    padding="max_length",
-        #                                    truncation=True,
-        #                                    max_length=args.max_segments_per_sent)
-        #     self.src_bert, self.src_bert_mask = src_bert.input_ids, src_bert.attention_mask
-        #     assert len(self.tgt_char) == len(self.src_bert) == len(self.src_bert_mask)
 
     def __getitem__(self, index):
         src_bert = getattr(self, 'src_bert', None)
@@ -110,7 +95,8 @@ class DialectData(Dataset):
                       src_bert_mask=src_bert_mask,
                       tgt_raw=self.tgt_raw[index],
                       tgt_char=self.tgt_char[index],
-                      src_segments=self.src_segments[index])
+                      src_segments=self.src_segments[index],
+                      segments_per_token=self.segments_per_token[index])
         for feature in self.features:
             inputs[feature] = getattr(self, feature)[index]
         return inputs
@@ -123,6 +109,7 @@ class DialectData(Dataset):
         src_char_batch, src_segments_batch = [], []
         src_bert_batch, src_bert_mask_batch = [], []
         tgt_char_batch = []
+        segments_per_token_batch = []
         features_labels_batch = {feature: [] for feature in self.features}
         for inputs in data_batch:
             src_raw_batch.append(inputs['src_raw'])
@@ -130,6 +117,7 @@ class DialectData(Dataset):
             tgt_raw_batch.append(inputs['tgt_raw'])
             tgt_char_batch.append(inputs['tgt_char'])
             src_segments_batch.append(inputs['src_segments'])
+            segments_per_token_batch.append(inputs['segments_per_token'])
             for feature in self.features:
                 features_labels_batch[feature].append(inputs[feature])
             if inputs['src_bert']:
@@ -153,6 +141,7 @@ class DialectData(Dataset):
         batch = dict(src_raw=src_raw_batch,
                      src_char=src_char_batch,
                      src_segments=src_segments_batch,
+                     segments_per_token=segments_per_token_batch,
                      src_bert=src_bert_batch if isinstance(src_bert_batch, Tensor) else None,
                      src_bert_mask=src_bert_mask_batch if isinstance(src_bert_mask_batch, Tensor) else None,
                      tgt_raw=tgt_raw_batch,
@@ -219,6 +208,7 @@ def load_data(args, vocab, device, load=False):
     features_labels = {feature_name: feature[:args.data_size]
                        for feature_name, feature in features_ids_labels.items()}
 
+    src_bert, src_bert_mask = None, None
     if args.use_bert_enc:
         bert_tokenizer = BertTokenizerFast.from_pretrained(
             args.bert_model, cache_dir=args.bert_cache_dir)
@@ -346,4 +336,7 @@ def preprocess_for_sos(sentence):
     sentence = re.sub(r',', r'،', sentence)
     sentence = re.sub(r'\?', r'؟', sentence)
     sentence = re.sub(r'_', '', sentence)
+    sentence = re.sub(r'ﺁ', r'آ', sentence)
+    # Merge step
+    sentence = re.sub(r' ', r'', sentence)
     return sentence
