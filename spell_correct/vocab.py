@@ -196,11 +196,9 @@ class VocabEntry(object):
                 pos_vocab.update(token)
         pos2id = dict()
         pos2id['<pad>'] = 0
-        pos2id['<s>'] = 1
-        pos2id['</s>'] = 2
-        pos2id['<unk>'] = 3
-        pos2id['<b>'] = 4
-        for i, pos in enumerate(pos_vocab, start=5):
+        pos2id['<b>'] = 1
+        pos2id['<unk>'] = 2
+        for i, pos in enumerate(pos_vocab, start=3):
             pos2id[pos] = i
         return pos2id
 

@@ -13,8 +13,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.tensorboard import SummaryWriter
 
 from spell_correct.vocab import Vocab
-from spell_correct.spelling_corrector import SpellingCorrector
-from spell_correct.pos_tagger import POSTagger
+from spell_correct.joint_learner import JointLearner
 from spell_correct.dialect_data import load_data, preprocess
 
 class Trainer:
@@ -28,19 +27,22 @@ class Trainer:
 
         self.train_iter, self.dev_iter, self.annotations = load_data(
             args, self.vocab, self.device, args.load)
-        self.model = POSTagger(args,
-                               vocab=self.vocab,
-                               bert_tokenizer=self.dev_iter.dataset.bert_tokenizer,
-                               device=self.device).to(self.device)
+        self.model = JointLearner(args,
+                                 vocab=self.vocab,
+                                 bert_tokenizer=self.dev_iter.dataset.bert_tokenizer,
+                                 device=self.device).to(self.device)
 
         self.criterion = nn.CrossEntropyLoss(
             ignore_index=self.vocab.tgt.char2id['<pad>'])
         self.criterion_char = nn.CrossEntropyLoss(
             ignore_index=self.vocab.tgt.char2id['<pad>'])
-        self.optimizer = optim.Adam(self.model.parameters(), lr=1e-3)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=args.lr)
         self.scheduler = ReduceLROnPlateau(
-            self.optimizer, 'min', patience=0, factor=0.5)
+            self.optimizer, 'min', patience=10, factor=0.5)
         self.writer = SummaryWriter(os.path.join(args.logs, 'tensorboard'))
+
+        self.src_to_tgt = np.vectorize(
+            lambda x: self.vocab.tgt.char2id[self.vocab.src.id2char[x]])
 
     @staticmethod
     def epoch_time(start_time: int,
@@ -91,6 +93,41 @@ class Trainer:
                      for f in features_labels}
         return precision, recall
 
+    def _compute_word_accuracy_word_level(self, outputs_char, src, tgt):
+        predictions = outputs_char.argmax(-1).permute(1, 0)
+        tgt_perm = tgt[:, :, 1:]
+        tgt_perm = tgt_perm.reshape(-1, self.args.max_decode_len)
+        tgt_perm = tgt_perm[torch.any(tgt_perm.bool(), dim=1)]
+        src_perm = src[:, :, 1:]
+        src_perm = src_perm.reshape(-1, self.args.max_decode_len)
+        src_perm = src_perm[torch.any(src_perm.bool(), dim=1)]
+
+        resized_predictions = torch.cat(
+            [predictions, torch.zeros_like(tgt_perm)], dim=1)[:, :tgt_perm.shape[1]]
+        src_mapped_to_tgt = self.src_to_tgt(src_perm.detach().cpu().numpy())
+        src_mapped_to_tgt = torch.from_numpy(src_mapped_to_tgt).to(self.device)
+
+        e_mask = torch.all(src_mapped_to_tgt == tgt_perm, dim=1)
+        ne_mask = torch.bitwise_not(e_mask)
+
+        total = 0
+        correct_total = [0, 0, 0, 0]
+        for i, mask in enumerate([e_mask, ne_mask]):
+            tgt_mask = tgt_perm[mask] != self.vocab.tgt['<pad>']
+            pred_valid = resized_predictions[mask] * tgt_mask
+            correct_forms = torch.all(tgt_perm[mask] == pred_valid, dim=1)
+            if i == 1:
+                ne_changed = torch.all(
+                    src_mapped_to_tgt[mask] == pred_valid, dim=1)
+            total_len = tgt_perm[mask].shape[0]
+            correct_len = torch.sum(correct_forms).item()
+            correct_total[i * 2] += correct_len
+            correct_total[i * 2 + 1] += total_len
+            total += total_len
+        correct_total.append(correct_total[-1] - torch.sum(ne_changed).item())
+        assert total == src_perm.shape[0]
+        return correct_total
+
     def train(self):
         metrics_train, metrics_val = {}, {}
         for epoch in range(self.args.epochs):
@@ -100,20 +137,29 @@ class Trainer:
             start_time = time.time()
             for iteration, batch in enumerate(self.train_iter):
                 self.model.zero_grad()
+                loss = 0
+                # Tagger
                 output = self.model(batch, use_crf=self.args.use_crf)
                 if self.args.use_crf:
-                    loss = output['loss']
-                    # loss = 0
+                    if output['tagger'] is not None:
+                        loss += output['tagger']['loss']
                 else:
-                    loss = self._compute_loss(
+                    loss += self._compute_loss(
                         output['lstm_feats'], batch['tgt_char'])
-                # outputs_char = self.model(batch)
-                # loss_char = self._compute_loss_spell_correct(outputs_char, batch['tgt_char'])
-                # loss += loss_char
+                
+                # Standardizer
+                if output['standardizer'] is not None:
+                    loss_standardizer = self._compute_loss_spell_correct(
+                        output['standardizer'], batch['tgt_char'])
+                    loss += loss_standardizer
+                if self.args.mode == 'tagger':
+                    loss /= len(self.features)
+                elif self.args.mode == 'joint':
+                    loss /= len(self.features) + 1
                 loss.backward()
                 self.optimizer.step()
                 epoch_loss += loss.item()
-                if iteration and iteration % 10 == 0 and len(self.train_iter) - iteration > 10 \
+                if iteration and iteration % 150 == 0 and len(self.train_iter) - iteration > 10 \
                         or iteration + 1 == len(self.train_iter):
                     for param_group in self.optimizer.param_groups:
                         lr = param_group['lr']
@@ -136,8 +182,8 @@ class Trainer:
                     continue
                 elif 'loss' in m:
                     log_output += f"\t{m.ljust(25)}: {metrics[m][-1]:.7f}\n" 
-                elif 'f1score' in m:
-                    f = m[4:-8]
+                elif 'f1' in m:
+                    f = m[4:-3]
                     precision = metrics[f'dev_{f}_precision'][-1]
                     recall = metrics[f'dev_{f}_recall'][-1]
                     log_output += f"\t{m.ljust(25)}: {metrics[m][-1]:.1%}  {precision:.1%}  {recall:.1%}\n"
@@ -146,7 +192,7 @@ class Trainer:
             print(log_output)
             self.scheduler.step(metrics['dev_loss'][-1])
 
-        self.save_model()
+        # self.save_model()
         return metrics
 
     def evaluate(self):
@@ -154,44 +200,70 @@ class Trainer:
         grammatical_features = [f for f in self.features if f not in constant_features]
         self.model.eval()
         with torch.no_grad():
+            correct_total = [0, 0, 0, 0, 0]
             correct, total = {f: 0 for f in constant_features}, {
                 f: 0 for f in constant_features}
             precision, recall = {f: 0 for f in grammatical_features}, {
                 f: 0 for f in grammatical_features}
             epoch_loss = 0
             for batch in self.dev_iter:
-
+                loss = 0
                 output = self.model(
-                    batch, use_crf=self.args.use_crf, decode=True)
-                if self.args.use_crf:
-                    loss = output['loss']
-                    c, t = self._compute_accuracy(
-                        {k: v for k, v in output['outputs'].items() if k in constant_features},
-                        {k: v for k, v in output['features_labels'].items() if k in constant_features})
-                    p, r = self._compute_precision_recall(
-                        {k: v for k, v in output['outputs'].items() if k in grammatical_features},
-                        {k: v for k, v in output['features_labels'].items() if k in grammatical_features})
-                    for f in constant_features:
-                        correct[f] += c[f]
-                        total[f] += t[f]
-                    for f in grammatical_features:
-                        precision[f] += p[f]
-                        recall[f] += r[f]
-                else:
-                    loss = self._compute_loss(
-                        output['lstm_feats'], batch['tgt_char'])
-                    outputs = output['lstm_feats'].argmax(-1).permute(1, 0)
-                    sensitivity_specificity_batch = self._compute_accuracy(
-                        outputs, batch['src_char'], batch['tgt_char'])
+                    batch, use_crf=self.args.use_crf, decode=True, teacher_force=False)
+                # Standardizer
+                if output['standardizer'] is not None:
+                    loss += self._compute_loss_spell_correct(output['standardizer'],
+                                           batch['tgt_char'])
+                    correct_total_batch = self._compute_word_accuracy_word_level(
+                        output['standardizer'], batch['src_char'], batch['tgt_char'])
+                    correct_total = [sum(x) for x in zip(
+                        correct_total, correct_total_batch)]
+                
+                # Tagger
+                if output['tagger'] is not None:
+                    if self.args.use_crf:
+                        loss += output['tagger']['loss']
+                        c, t = self._compute_accuracy(
+                            {k: v for k, v in output['tagger']['features_outputs'].items() if k in constant_features},
+                            {k: v for k, v in output['tagger']['features_labels'].items() if k in constant_features})
+                        p, r = self._compute_precision_recall(
+                            {k: v for k, v in output['tagger']['features_outputs'].items() if k in grammatical_features},
+                            {k: v for k, v in output['tagger']['features_labels'].items() if k in grammatical_features})
+                        for f in constant_features:
+                            correct[f] += c[f]
+                            total[f] += t[f]
+                        for f in grammatical_features:
+                            precision[f] += p[f]
+                            recall[f] += r[f]
+                    else:
+                        loss = self._compute_loss(
+                            output['tagger']['lstm_feats'], batch['tgt_char'])
+                        outputs = output['tagger']['lstm_feats'].argmax(
+                            -1).permute(1, 0)
+                        sensitivity_specificity_batch = self._compute_accuracy(
+                            outputs, batch['src_char'], batch['tgt_char'])
+                    
+                if self.args.mode == 'tagger':
+                    loss /= len(self.features)
+                elif self.args.mode == 'joint':
+                    loss /= len(self.features) + 1
+                
                 epoch_loss += loss.item()
 
         metrics = {}
-        for f in constant_features:
-            metrics[f'dev_{f}_accuracy'] = correct[f] / total[f]
-        for f in grammatical_features:
-            metrics[f'dev_{f}_precision'] = precision[f]
-            metrics[f'dev_{f}_recall'] = recall[f] 
-            metrics[f'dev_{f}_f1score'] = 2 * (precision[f] * recall[f]) / (precision[f] + recall[f]) if precision[f] + recall[f] else 0
+        if output['standardizer'] is not None:
+            metrics['dev_std_recall'] = (
+                correct_total[0] + correct_total[4]) / (correct_total[1] + correct_total[3])
+            metrics['dev_std_precision'] = correct_total[2] / correct_total[3]
+            metrics['dev_std_f1'] = 2 * (metrics['dev_std_recall'] * metrics['dev_std_precision']) / (
+            metrics['dev_std_recall'] + metrics['dev_std_precision'])
+        if output['tagger'] is not None:
+            for f in constant_features:
+                metrics[f'dev_{f}_accuracy'] = correct[f] / total[f]
+            for f in grammatical_features:
+                metrics[f'dev_{f}_precision'] = precision[f]
+                metrics[f'dev_{f}_recall'] = recall[f] 
+                metrics[f'dev_{f}_f1'] = 2 * (precision[f] * recall[f]) / (precision[f] + recall[f]) if precision[f] + recall[f] else 0
         metrics['dev_loss'] = epoch_loss / len(self.dev_iter)
         return metrics
 
@@ -203,7 +275,7 @@ class Trainer:
                     batch, use_crf=self.args.use_crf, decode=True, output_loss=False)
         features_tags = {}
         for f in self.features:
-            features_tags[f] = [seg[self.args.window_size] for seg in output['outputs'][f]]
+            features_tags[f] = [seg[self.args.window_size] for seg in output['features_outputs'][f]]
         return features_tags
             
 
@@ -261,7 +333,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch_size", default=4,
                         type=int, help="Batch size.")
-    parser.add_argument("--epochs", default=12, type=int,
+    parser.add_argument("--epochs", default=50, type=int,
                         help="Number of epochs.")
     parser.add_argument("--ce_dim", default=128, type=int,
                         help="Word embedding dimension.")
@@ -275,6 +347,8 @@ def main():
                         help="Maximum number of examples to load.")
     parser.add_argument("--train_split", default=0.9, type=float,
                         help="Proportion with which to split the train and dev data.")
+    parser.add_argument("--lr", default=1e-3, type=float,
+                        help="Learning rate.")
     parser.add_argument("--max_sent_len", default=35, type=int,
                         help="Maximum length of BERT input sequence.")
     parser.add_argument("--max_decode_len", default=25, type=int,
@@ -292,8 +366,10 @@ def main():
                         default='pos state number gender person voice mood aspect verbForm',
                         # default='pos',
                         help='Grammatical features that we are training for')
-    parser.add_argument("--mode", default='pos_tagger',
-                        help="Training mode.", choices=['pos_tagger', 'standardizer'])
+    parser.add_argument("--features_layer", default=64, type=int,
+                        help="Features layer dimension.")
+    parser.add_argument("--mode", default='tagger',
+                        help="Training mode.", choices=['tagger', 'standardizer', 'joint'])
     parser.add_argument("--gpu_index", default=6, type=int,
                         help="Index of GPU to be used.")
     parser.add_argument("--vocab", dest='vocab_path',
@@ -322,7 +398,8 @@ def main():
 
     # args.load = '/local/ccayral/orthonormalDA1/model_weights/train_pos-2021-07-27_21:19:57-bs=4,cd=128,ds=10000,e=12,gi=6,mdl=25,msps=60,msl=35,rd=512,rdc=256,rl=2,s=42,uc=True,ws=7.pt'
     # args.train_split = 0
-    # args.use_bert_enc = 'concat'
+    # args.use_bert_enc = 'init'
+    # args.mode = 'tagger'
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)

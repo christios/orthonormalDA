@@ -67,10 +67,10 @@ def create_padded_segment_contexts(sents, pad_token, boundary_token, max_sent_le
             for _ in range(len(token)):
                 context = []
                 if max_seg_length:
-                    if segments_with_boundaries[k][0] == 4:
+                    if segments_with_boundaries[k][0] == boundary_token:
                         k += 1
                 else:
-                    if segments_with_boundaries[k] == 4:
+                    if segments_with_boundaries[k] == boundary_token:
                         k += 1
                 for seg_pos in range(k - window_size, k + window_size + 1):
                     if seg_pos < 0 or seg_pos >= len(segments_with_boundaries):

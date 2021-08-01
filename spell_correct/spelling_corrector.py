@@ -29,10 +29,10 @@ class SpellingCorrector(nn.Module):
             self.bert_encoder.config.pad_token_id = self.bert_tokenizer.pad_token_id
             self.word_to_char_bert = nn.Linear(
                 self.bert_encoder.config.hidden_size, args.rnn_dim_char)
-            self.rel = nn.ReLU()
             for param in self.bert_encoder.parameters():
                 param.requires_grad = False
         bert_emb_dim = self.bert_encoder.config.hidden_size if args.use_bert_enc == 'concat' else 0
+        tagger_context_dim = args.features_layer if args.mode == 'joint' else 0
 
         self.encoder = Encoder(input_dim=len(vocab.src.char2id),
                                emb_dim=args.ce_dim,
@@ -40,6 +40,7 @@ class SpellingCorrector(nn.Module):
                                dec_hid_dim=args.rnn_dim_char,
                                num_layers=args.rnn_layers,
                                bert_emb_dim=bert_emb_dim,
+                               tagger_context_dim=tagger_context_dim,
                                dropout=args.dropout)
         self.attention = Attention(enc_hid_dim=args.rnn_dim_char,
                                    dec_hid_dim=args.rnn_dim_char,
@@ -95,10 +96,12 @@ class SpellingCorrector(nn.Module):
     def forward(self,
                 batch: Dict[str, Union[Tensor,
                                        List[List[int]], List[str], List[int], None]],
+                tagger_context: Optional[Tensor] = None,
                 teacher_force: bool = True,
                 return_attn: bool = False,
                 integrated_gradients: bool = False,
-                return_valid_indexes: bool = False) -> Tensor:
+                return_valid_indexes: bool = False,
+                return_encoder_outputs: bool = False) -> Tensor:
         """- `batch_size_char` is the number of valid words (not padded) in the char src input
            - src_char -> [max_len_src_word + 1, batch_size_word, max_len_src_char + 1]
            - tgt_char -> same as src_char
@@ -109,15 +112,10 @@ class SpellingCorrector(nn.Module):
             e.g. if teacher_forcing_ratio is 0.75 we use teacher forcing 75% of the time"""
         src_char: Tensor = batch['src_char']
         tgt_char: Tensor = batch['tgt_char']
+        src_bert, src_bert_mask = None, None
         if batch.get('src_bert') is not None:
             src_bert: Optional[List[str]] = batch['src_bert']
             src_bert_mask: Optional[List[int]] = batch['src_bert_mask']
-        else:
-            src_bert, src_bert_mask = None, None
-        if batch.get('src_word') is not None:
-            src_word: Tensor = batch['src_word']
-            lengths_word: List[int] = batch['lengths_word']
-            tgt_word: Tensor = batch['tgt_word']
 
         processed_inputs = self._process_inputs(
             src_char, src_bert, src_bert_mask, tgt_char)
@@ -132,6 +130,9 @@ class SpellingCorrector(nn.Module):
         tgt_indexes_valid = processed_inputs['tgt_indexes_valid']
         bert_encodings = processed_inputs['bert_encodings']
 
+        if tagger_context is not None:
+            assert src_char_valid.size(1) == tagger_context.size(0)
+
         batch_size_char = src_char_valid.shape[1]  # number of valid words
         max_len_tgt_char = tgt_char_valid.shape[0]
         max_len_src_char = src_char_valid.shape[0]
@@ -144,7 +145,8 @@ class SpellingCorrector(nn.Module):
             gradients, probs = [], []
 
         encoder_outputs, hidden, embedded = self.encoder(
-            src_char_valid, lengths_char_src, bert_encodings, integrated_gradients=integrated_gradients)
+            src_char_valid, lengths_char_src, bert_encodings,
+            tagger_context=tagger_context, integrated_gradients=integrated_gradients)
 
         outputs = torch.zeros(max_len_tgt_char-1, batch_size_char,
             tgt_vocab_size_char).to(self.device)
@@ -174,6 +176,8 @@ class SpellingCorrector(nn.Module):
             outputs.append(probs)
         if return_valid_indexes:
             outputs.append(tgt_indexes_valid)
+        if return_encoder_outputs:
+            outputs.append(encoder_outputs)
         outputs = outputs[0] if len(outputs) == 1 else outputs
 
         return outputs
@@ -196,7 +200,7 @@ class SpellingCorrector(nn.Module):
             bert_indexes_valid = torch.any(logits_words_debatch, dim=1)
             logits_words_valid = logits_words_debatch[bert_indexes_valid]
             if self.args.use_bert_enc == 'init':
-                logits_words_valid = self.rel(self.word_to_char_bert(logits_words_valid))
+                logits_words_valid = self.word_to_char_bert(logits_words_valid)
             bert_encodings = logits_words_valid.unsqueeze(0)
 
         # Equivalent of tf.gather_nd() for src and tgt

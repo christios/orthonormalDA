@@ -59,7 +59,7 @@ class DialectData(Dataset):
             i += 1
             assert len(self.src_raw) == len(self.src_bert) == len(self.src_bert_mask)
 
-        if args.mode == 'pos_tagger':
+        if args.mode in ['tagger', 'joint']:
             self.src_segments = [f[i] for f in data]
             self.src_segments = create_padded_segment_contexts(self.src_segments,
                                                                self.vocab.src.char2id['<pad>'],
@@ -73,32 +73,35 @@ class DialectData(Dataset):
             for feature in features:
                 setattr(self, feature, [f[i] for f in data])
                 setattr(self, feature, create_padded_segment_contexts(getattr(self, feature),
-                                                                          self.vocab.tgt.word2id['<pad>'],
-                                                                          self.vocab.src.char2id['<b>'],
-                                                                          max_sent_length=args.max_sent_len,
-                                                                          max_seg_per_token=4,
-                                                                          window_size=args.window_size))
+                                                                      self.vocab.tgt.word2id['<pad>'],
+                                                                      getattr(self.vocab, feature).word2id['<b>'],
+                                                                      max_sent_length=args.max_sent_len,
+                                                                      max_seg_per_token=4,
+                                                                      window_size=args.window_size))
                 i += 1
                 assert len(self.tgt_char) == len(getattr(self, feature))
 
     def __getitem__(self, index):
         src_bert = getattr(self, 'src_bert', None)
         src_bert_mask = getattr(self, 'src_bert_mask', None)
-        lengths_word = getattr(self, 'lengths_word', None)
+        src_segments = getattr(self, 'src_segments', None)
         if src_bert:
             src_bert = src_bert[index]
             src_bert_mask = src_bert_mask[index]
+        if src_segments:
+            src_segments = src_segments[index]
         inputs = dict(src_raw=self.src_raw[index],
                       src_char=self.src_char[index],
-                      lengths_word=lengths_word,
                       src_bert=src_bert,
                       src_bert_mask=src_bert_mask,
                       tgt_raw=self.tgt_raw[index],
                       tgt_char=self.tgt_char[index],
-                      src_segments=self.src_segments[index],
+                      src_segments=src_segments,
                       segments_per_token=self.segments_per_token[index])
-        for feature in self.features:
-            inputs[feature] = getattr(self, feature)[index]
+        
+        if src_segments:
+            for feature in self.features:
+                inputs[feature] = getattr(self, feature)[index]
         return inputs
 
     def __len__(self):
@@ -116,10 +119,11 @@ class DialectData(Dataset):
             src_char_batch.append(inputs['src_char'])
             tgt_raw_batch.append(inputs['tgt_raw'])
             tgt_char_batch.append(inputs['tgt_char'])
-            src_segments_batch.append(inputs['src_segments'])
-            segments_per_token_batch.append(inputs['segments_per_token'])
-            for feature in self.features:
-                features_labels_batch[feature].append(inputs[feature])
+            if inputs['src_segments']:
+                src_segments_batch.append(inputs['src_segments'])
+                segments_per_token_batch.append(inputs['segments_per_token'])
+                for feature in self.features:
+                    features_labels_batch[feature].append(inputs[feature])
             if inputs['src_bert']:
                 src_bert_batch.append(inputs['src_bert'])
                 src_bert_mask_batch.append(inputs['src_bert_mask'])
@@ -140,13 +144,13 @@ class DialectData(Dataset):
 
         batch = dict(src_raw=src_raw_batch,
                      src_char=src_char_batch,
-                     src_segments=src_segments_batch,
-                     segments_per_token=segments_per_token_batch,
+                     src_segments=src_segments_batch if inputs['src_segments'] is not None else None,
+                     segments_per_token=segments_per_token_batch if inputs['src_segments'] is not None else None,
                      src_bert=src_bert_batch if isinstance(src_bert_batch, Tensor) else None,
                      src_bert_mask=src_bert_mask_batch if isinstance(src_bert_mask_batch, Tensor) else None,
                      tgt_raw=tgt_raw_batch,
                      tgt_char=tgt_char_batch,
-                     features_labels=features_labels_batch)
+                     features_labels=features_labels_batch if inputs['src_segments'] is not None else None)
 
         return batch
 
@@ -190,7 +194,7 @@ def generate_char_dict():
 def load_data(args, vocab, device, load=False):
     asc, annotations = read_asc(args)
 
-    char_ids_src = vocab.src.words2charindices(asc['src'], add_beg_end=False)
+    char_ids_src = vocab.src.words2charindices(asc['src'])
     char_ids_tgt = vocab.tgt.words2charindices(asc['tgt'])
     src_char = char_ids_src[:args.data_size]
     tgt_char = char_ids_tgt[:args.data_size]

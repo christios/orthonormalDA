@@ -32,7 +32,6 @@ class POSTagger(nn.Module):
             self.bert_encoder.config.pad_token_id = self.bert_tokenizer.pad_token_id
             self.word_to_char_bert = nn.Linear(
                 self.bert_encoder.config.hidden_size, args.rnn_dim_char)
-            self.rel = nn.ReLU()
             for param in self.bert_encoder.parameters():
                 param.requires_grad = False
         self.bert_emb_dim = self.bert_encoder.config.hidden_size if args.use_bert_enc else 0
@@ -118,9 +117,6 @@ class POSTagger(nn.Module):
                 -1, logits_words.size(-1))
             bert_indexes_valid = torch.any(logits_words_debatch, dim=1)
             logits_words_valid = logits_words_debatch[bert_indexes_valid]
-            if self.args.use_bert_enc == 'init':
-                logits_words_valid = self.rel(
-                    self.word_to_char_bert(logits_words_valid))
             bert_encodings = logits_words_valid
 
         valid_segments = self._get_valid_segments(src_segments, segments_per_token, bert_encodings)

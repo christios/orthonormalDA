@@ -1,5 +1,5 @@
 from torchcrf import CRF
-from typing import Tuple
+from typing import Tuple, Optional
 
 import torch
 from torch import Tensor
@@ -16,6 +16,7 @@ class Encoder(nn.Module):
                  dec_hid_dim: int,
                  num_layers: int = 1,
                  bert_emb_dim: int = 0,
+                 tagger_context_dim: int = 0,
                  dropout: float = 0.1):
         super().__init__()
 
@@ -27,7 +28,7 @@ class Encoder(nn.Module):
         self.num_layers = num_layers
         self.dropout = dropout
         self.embedding = nn.Embedding(input_dim, emb_dim)
-        self.rnn = nn.LSTM(input_size=emb_dim + bert_emb_dim,
+        self.rnn = nn.LSTM(input_size=emb_dim + bert_emb_dim + tagger_context_dim,
                            hidden_size=enc_hid_dim,
                            bidirectional=True,
                            num_layers=num_layers)
@@ -39,6 +40,7 @@ class Encoder(nn.Module):
                 lengths,
                 bert_encodings=None,
                 hidden_char=None,
+                tagger_context: Optional[Tensor] = None,
                 integrated_gradients: bool = False) -> Tuple[Tensor]:
         """- src: [src_len, batch_size]
         - integrated_gradients: if True, then src is a batch of already embedded inputs
@@ -49,6 +51,8 @@ class Encoder(nn.Module):
         if bert_encodings is not None and self.bert_emb_dim:
             src = torch.cat([src, bert_encodings.repeat(src.size(0), 1, 1)], dim=-1)
             bert_encodings = None
+        if tagger_context is not None:
+            src = torch.cat([src, tagger_context.repeat(src.size(0), 1, 1)], dim=-1)
         # embedded = [src_len, batch_size, cle_dim]
         embedded = self.dropout(src)
         # outputs: [src_len, batch_size, 2*rnn_dim] final-layer hidden states
@@ -222,11 +226,9 @@ class BiLSTM_CRF(nn.Module):
             self.features_crf[f] = getattr(self, f'{f}_crf')
             
         # Maps the output of the LSTM into tag space.
-        self.f0 = nn.Linear(rnn_dim * 2, rnn_dim)
-        self.f1 = nn.Linear(rnn_dim, rnn_dim // 2)
         self.f1_to_tag = {}
         for f, num in num_tags.items():
-            setattr(self, f'{f}_f1_to_tag', nn.Linear(rnn_dim // 2, num))
+            setattr(self, f'{f}_f1_to_tag', nn.Linear(rnn_dim * 2, num))
             self.f1_to_tag[f] = getattr(self, f'{f}_f1_to_tag')
 
     def forward(self,
@@ -256,7 +258,7 @@ class BiLSTM_CRF(nn.Module):
 
         outputs, _ = self.lstm(embedded, bert_encodings)
         #outputs = [src_len, batch_size, rnn_dim * 2] because 2 directions
-        features_lstm_feats = {f: self.f1_to_tag[f](self.f1(self.f0(outputs))) for f in self.num_tags}
+        features_lstm_feats = {f: self.f1_to_tag[f](outputs) for f in self.num_tags}
         if use_crf:
             outputs, loss = None, None
             if decode:
@@ -264,11 +266,11 @@ class BiLSTM_CRF(nn.Module):
                            for f, crf in self.features_crf.items()}
             if output_loss:
                 loss = - sum(crf(features_lstm_feats[f], features_labels[f])
-                             for f, crf in self.features_crf.items()) / len(self.features_crf)
-            output = dict(lstm_feats=features_lstm_feats, loss=loss,
-                          outputs=outputs, features_labels=features_labels)
+                             for f, crf in self.features_crf.items())
+            output = dict(features_lstm_feats=features_lstm_feats, loss=loss,
+                          features_outputs=outputs, features_labels=features_labels)
 
         else:
-            output = dict(lstm_feats=features_lstm_feats,
-                          loss=None, outputs=None)
+            output = dict(features_lstm_feats=features_lstm_feats,
+                          loss=None, features_outputs=None, features_labels=None)
         return output
