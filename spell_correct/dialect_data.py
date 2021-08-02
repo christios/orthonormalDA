@@ -238,6 +238,7 @@ def load_data(args, vocab, device, load=False):
     for feature_name, feature in asc['features'].items():
         features_ids_labels[feature_name] = getattr(vocab, feature_name).pos2indices(feature)
     
+    taxonomy_labels = None
     if 'taxonomy' in args.mode:
         taxonomy_labels = vocab.taxonomy.taxonomy2indices(asc['taxonomy'])[:args.data_size]
 
