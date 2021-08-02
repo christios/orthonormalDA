@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.tensorboard import SummaryWriter
+from sklearn.metrics import f1_score
 
 from spell_correct.vocab import Vocab
 from spell_correct.joint_learner import JointLearner
@@ -67,6 +68,20 @@ class Trainer:
         outputs = outputs.view(-1, outputs.shape[-1])
         tgt = tgt.permute(1, 0).reshape(outputs.shape[0])
         return self.criterion_char(outputs, tgt)
+
+    def _compute_loss_taxonomy(self, outputs, tgt):
+        outputs = torch.stack([tokens for tokens in outputs.values()]).permute(1, 0, 2)
+        outputs = outputs.reshape(-1, outputs.size(-1))
+        tgt = tgt.reshape(-1)
+        return self.criterion_char(outputs, tgt)
+
+    def _compute_accuracy_taxonomy(self, outputs, tgt):
+        outputs = torch.stack([tokens for tokens in outputs.values()]).permute(
+            1, 0, 2).argmax(-1)
+        outputs = outputs.reshape(-1).detach().cpu().numpy()
+        tgt = tgt.reshape(-1).detach().cpu().numpy()
+        f1score = f1_score(tgt, outputs, pos_label=self.vocab.taxonomy.word2id['<y>'])
+        return f1score
 
     def _compute_accuracy(self, outputs, features_labels):
         outputs = {f: torch.tensor(outputs[f], device=self.device)[
@@ -140,26 +155,27 @@ class Trainer:
                 loss = 0
                 # Tagger
                 output = self.model(batch, use_crf=self.args.use_crf)
-                if self.args.use_crf:
-                    if output['tagger'] is not None:
-                        loss += output['tagger']['loss']
-                else:
-                    loss += self._compute_loss(
-                        output['lstm_feats'], batch['tgt_char'])
-                
+                if output['tagger'] is not None:
+                    loss += output['tagger']['loss']
                 # Standardizer
                 if output['standardizer'] is not None:
                     loss_standardizer = self._compute_loss_spell_correct(
                         output['standardizer'], batch['tgt_char'])
                     loss += loss_standardizer
+                # Taxonomy
+                if output['taxonomy'] is not None:
+                    loss += self._compute_loss_taxonomy(
+                        output['taxonomy'], batch['taxonomy'])
                 if self.args.mode == 'tagger':
                     loss /= len(self.features)
                 elif self.args.mode == 'joint':
                     loss /= len(self.features) + 1
+                elif self.args.mode == 'standardizer_taxonomy':
+                    loss /= 2
                 loss.backward()
                 self.optimizer.step()
                 epoch_loss += loss.item()
-                if iteration and iteration % 150 == 0 and len(self.train_iter) - iteration > 10 \
+                if iteration and iteration % 50 == 0 and len(self.train_iter) - iteration > 10 \
                         or iteration + 1 == len(self.train_iter):
                     for param_group in self.optimizer.param_groups:
                         lr = param_group['lr']
@@ -182,7 +198,7 @@ class Trainer:
                     continue
                 elif 'loss' in m:
                     log_output += f"\t{m.ljust(25)}: {metrics[m][-1]:.7f}\n" 
-                elif 'f1' in m:
+                elif 'f1' in m and 'taxonomy' not in m:
                     f = m[4:-3]
                     precision = metrics[f'dev_{f}_precision'][-1]
                     recall = metrics[f'dev_{f}_recall'][-1]
@@ -200,6 +216,7 @@ class Trainer:
         grammatical_features = [f for f in self.features if f not in constant_features]
         self.model.eval()
         with torch.no_grad():
+            taxonomy_f1score = 0
             correct_total = [0, 0, 0, 0, 0]
             correct, total = {f: 0 for f in constant_features}, {
                 f: 0 for f in constant_features}
@@ -218,7 +235,12 @@ class Trainer:
                         output['standardizer'], batch['src_char'], batch['tgt_char'])
                     correct_total = [sum(x) for x in zip(
                         correct_total, correct_total_batch)]
-                
+                if output['taxonomy'] is not None:
+                    loss +=  self._compute_loss_taxonomy(
+                        output['taxonomy'], batch['taxonomy'])
+                    taxonomy_f1score = self._compute_accuracy_taxonomy(
+                        output['taxonomy'], batch['taxonomy'])
+                    
                 # Tagger
                 if output['tagger'] is not None:
                     if self.args.use_crf:
@@ -257,6 +279,8 @@ class Trainer:
             metrics['dev_std_precision'] = correct_total[2] / correct_total[3]
             metrics['dev_std_f1'] = 2 * (metrics['dev_std_recall'] * metrics['dev_std_precision']) / (
             metrics['dev_std_recall'] + metrics['dev_std_precision'])
+        if output['taxonomy'] is not None:
+            metrics['dev_taxonomy_f1'] = taxonomy_f1score
         if output['tagger'] is not None:
             for f in constant_features:
                 metrics[f'dev_{f}_accuracy'] = correct[f] / total[f]
@@ -369,7 +393,8 @@ def main():
     parser.add_argument("--features_layer", default=64, type=int,
                         help="Features layer dimension.")
     parser.add_argument("--mode", default='tagger',
-                        help="Training mode.", choices=['tagger', 'standardizer', 'joint'])
+                        help="Training mode.",
+                        choices=['tagger', 'standardizer', 'standardizer_taxonomy', 'joint'])
     parser.add_argument("--gpu_index", default=6, type=int,
                         help="Index of GPU to be used.")
     parser.add_argument("--vocab", dest='vocab_path',
@@ -399,7 +424,7 @@ def main():
     # args.load = '/local/ccayral/orthonormalDA1/model_weights/train_pos-2021-07-27_21:19:57-bs=4,cd=128,ds=10000,e=12,gi=6,mdl=25,msps=60,msl=35,rd=512,rdc=256,rl=2,s=42,uc=True,ws=7.pt'
     # args.train_split = 0
     # args.use_bert_enc = 'init'
-    # args.mode = 'tagger'
+    # args.mode = 'standardizer_taxonomy'
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)

@@ -8,6 +8,7 @@ from torch.nn.utils.rnn import pad_sequence
 
 from spell_correct.pos_tagger import POSTagger
 from spell_correct.spelling_corrector import SpellingCorrector
+from spell_correct.models import TaxonomyTagger
 
 
 class JointLearner(nn.Module):
@@ -30,6 +31,8 @@ class JointLearner(nn.Module):
                                               vocab=self.vocab,
                                               bert_tokenizer=self.bert_tokenizer,
                                               device=self.device).to(self.device)
+        self.taxonomy_tagger = TaxonomyTagger(input_dim=args.rnn_dim_char * 2,
+                                              vocab=self.vocab).to(self.device)
         self.grammatical_features_layer = nn.Linear(
             len(args.features.split()), args.features_layer)
 
@@ -40,11 +43,22 @@ class JointLearner(nn.Module):
                 use_crf=True,
                 output_loss=True,
                 decode=False):
-        output_tagger, output_standardizer = None, None
+        output_tagger, output_standardizer, output_taxonomy_tagger = None, None, None
+        valid_indexes = None
         if self.args.mode == 'tagger':
             output_tagger = self.tagger(batch, use_crf=use_crf, output_loss=output_loss, decode=decode)
         elif self.args.mode == 'standardizer':
             output_standardizer = self.standardizer(batch, teacher_force=teacher_force)
+            output_standardizer = output_standardizer['outputs']
+        elif self.args.mode == 'standardizer_taxonomy':
+            output_standardizer = self.standardizer(batch,
+                teacher_force=teacher_force, return_encoder_outputs=True, return_valid_indexes=True)
+            encoder_outputs = output_standardizer['encoder_outputs']
+            decoder_outputs = output_standardizer['decoder_outputs']
+            valid_indexes = output_standardizer['valid_indexes']
+            output_taxonomy_tagger = self.taxonomy_tagger(
+                encoder_outputs=encoder_outputs.detach(), decoder_outputs=decoder_outputs.detach())
+            output_standardizer = output_standardizer['decoder_outputs']
         elif self.args.mode == 'joint':
             output_tagger = self.tagger(batch, use_crf=use_crf, output_loss=output_loss, decode=decode)
             features_lstm_feats = output_tagger['features_lstm_feats']
@@ -57,9 +71,12 @@ class JointLearner(nn.Module):
             tagger_context = self.grammatical_features_layer(tagger_context)
             output_standardizer = self.standardizer(
                 batch, tagger_context=tagger_context, teacher_force=teacher_force)
+            output_standardizer = output_standardizer['outputs']
             
         output = dict(tagger=output_tagger,
-                      standardizer=output_standardizer)
+                      standardizer=output_standardizer,
+                      taxonomy=output_taxonomy_tagger,
+                      valid_indexes=valid_indexes)
         return output
 
     def _map_segment_to_token(self, features_argmax, segments_per_token):

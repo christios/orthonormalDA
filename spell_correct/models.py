@@ -274,3 +274,31 @@ class BiLSTM_CRF(nn.Module):
             output = dict(features_lstm_feats=features_lstm_feats,
                           loss=None, features_outputs=None, features_labels=None)
         return output
+
+
+class TaxonomyTagger(nn.Module):
+    def __init__(self, input_dim, vocab):
+        super().__init__()
+        self.vocab = vocab
+        self.input_dim = input_dim
+        self.num_tags = len(vocab.taxonomy.word2id)
+        self.hidden2char = nn.Linear(input_dim, len(vocab.tgt.id2char))
+        self.taxonomy_categories_layers = {}
+        for tag_id in range(len(vocab.taxonomy.taxonomy2id)):
+            setattr(self, f'taxonomy_tagger_{tag_id}', nn.Linear(
+                input_dim, self.num_tags))
+            self.taxonomy_categories_layers[tag_id] = getattr(
+                self, f'taxonomy_tagger_{tag_id}')
+
+    def forward(self,
+                encoder_outputs: Tensor,
+                decoder_outputs: Tensor):
+        # encoder_outputs = self.hidden2char(encoder_outputs)
+        encoder_outputs = encoder_outputs.sum(0)
+        # decoder_outputs = decoder_outputs.sum(0)
+        # tagger_input = torch.cat([encoder_outputs, decoder_outputs], dim=-1)
+        tagger_input = encoder_outputs
+        self.taxonomy_categories_outputs = {
+            tag_id: layer(tagger_input) for tag_id, layer in self.taxonomy_categories_layers.items()
+        }
+        return self.taxonomy_categories_outputs

@@ -52,6 +52,11 @@ class DialectData(Dataset):
                                        max_word_length=args.max_decode_len)
         i += 1
         assert len(self.src_raw) == len(self.tgt_raw) == len(self.src_char) == len(self.tgt_char)
+        
+        if 'taxonomy' in args.mode:
+            self.taxonomy = [f[i] for f in data]
+            i += 1
+        
         if args.use_bert_enc:
             self.src_bert = [f[i] for f in data]
             i += 1
@@ -85,11 +90,14 @@ class DialectData(Dataset):
         src_bert = getattr(self, 'src_bert', None)
         src_bert_mask = getattr(self, 'src_bert_mask', None)
         src_segments = getattr(self, 'src_segments', None)
+        taxonomy = getattr(self, 'taxonomy', None)
         if src_bert:
             src_bert = src_bert[index]
             src_bert_mask = src_bert_mask[index]
         if src_segments:
             src_segments = src_segments[index]
+        if taxonomy:
+            taxonomy = taxonomy[index]
         inputs = dict(src_raw=self.src_raw[index],
                       src_char=self.src_char[index],
                       src_bert=src_bert,
@@ -97,7 +105,8 @@ class DialectData(Dataset):
                       tgt_raw=self.tgt_raw[index],
                       tgt_char=self.tgt_char[index],
                       src_segments=src_segments,
-                      segments_per_token=self.segments_per_token[index])
+                      segments_per_token=self.segments_per_token[index],
+                      taxonomy=taxonomy)
         
         if src_segments:
             for feature in self.features:
@@ -114,6 +123,7 @@ class DialectData(Dataset):
         tgt_char_batch = []
         segments_per_token_batch = []
         features_labels_batch = {feature: [] for feature in self.features}
+        taxonomy_batch = []
         for inputs in data_batch:
             src_raw_batch.append(inputs['src_raw'])
             src_char_batch.append(inputs['src_char'])
@@ -127,6 +137,9 @@ class DialectData(Dataset):
             if inputs['src_bert']:
                 src_bert_batch.append(inputs['src_bert'])
                 src_bert_mask_batch.append(inputs['src_bert_mask'])
+            if inputs['taxonomy']:
+                taxonomy_batch.append(torch.tensor(
+                    inputs['taxonomy'], dtype=torch.long, device=self.device))
 
         src_char_batch = torch.tensor(src_char_batch, dtype=torch.long).permute(
             1, 0, 2).to(self.device)
@@ -142,6 +155,18 @@ class DialectData(Dataset):
             src_bert_mask_batch = torch.tensor(
                 src_bert_mask_batch, dtype=torch.long).to(self.device)
 
+        if taxonomy_batch:
+            taxonomy_batch_ = []
+            column_indexes = [0] * len(taxonomy_batch)
+            num_examples = sum(len(sent) for sent in taxonomy_batch)
+            while sum(column_indexes) < num_examples:
+                for i in range(len(taxonomy_batch)):
+                    if column_indexes[i] < len(taxonomy_batch[i]):
+                        taxonomy_batch_.append(taxonomy_batch[i][column_indexes[i]])
+                        column_indexes[i] += 1
+            taxonomy_batch = torch.stack(taxonomy_batch_)
+
+
         batch = dict(src_raw=src_raw_batch,
                      src_char=src_char_batch,
                      src_segments=src_segments_batch if inputs['src_segments'] is not None else None,
@@ -150,7 +175,8 @@ class DialectData(Dataset):
                      src_bert_mask=src_bert_mask_batch if isinstance(src_bert_mask_batch, Tensor) else None,
                      tgt_raw=tgt_raw_batch,
                      tgt_char=tgt_char_batch,
-                     features_labels=features_labels_batch if inputs['src_segments'] is not None else None)
+                     features_labels=features_labels_batch if inputs['src_segments'] is not None else None,
+                     taxonomy=taxonomy_batch if taxonomy_batch is not None else None)
 
         return batch
 
@@ -200,13 +226,20 @@ def load_data(args, vocab, device, load=False):
     tgt_char = char_ids_tgt[:args.data_size]
     char_ids_src_segments = vocab.src.words2charindices(
         asc['src_segments'], segments=True)
+    # If model is loaded, vocab gets loaded with it (necessary)
     if not load:
         for feature_name, feature in asc['features'].items():
             feature_vocab = VocabEntry(VocabEntry.build_feature_vocab(feature))
             setattr(vocab, feature_name, feature_vocab)
+        taxonomy_map = VocabEntry(*VocabEntry.build_taxonomy_map(asc['taxonomy']))
+        vocab.taxonomy = taxonomy_map
+        
     features_ids_labels = {}
     for feature_name, feature in asc['features'].items():
         features_ids_labels[feature_name] = getattr(vocab, feature_name).pos2indices(feature)
+    
+    if 'taxonomy' in args.mode:
+        taxonomy_labels = vocab.taxonomy.taxonomy2indices(asc['taxonomy'])[:args.data_size]
 
     src_segments_char = char_ids_src_segments[:args.data_size]
     features_labels = {feature_name: feature[:args.data_size]
@@ -225,7 +258,8 @@ def load_data(args, vocab, device, load=False):
         src_bert_mask = src_bert_mask[:args.data_size]
 
     data = [x for x in [asc['src_raw'], asc['tgt_raw'], asc['src_segments'], src_char, tgt_char,
-                        src_bert, src_bert_mask, src_segments_char, *features_labels.values()] if x]
+                        src_bert, src_bert_mask, taxonomy_labels, src_segments_char,
+                        *features_labels.values()] if x]
     data = list(zip(*data))
 
     lengths = [int(len(src_char)*args.train_split),
@@ -282,6 +316,7 @@ def read_asc(args, get_untagged=False):
     src, src_raw, tgt, tgt_raw = [], [], [], []
     src_segments = []
     features = {feature: [] for feature in args.features.split()}
+    taxonomy = []
 
     data_ = []
     for idx, d in enumerate(data):
@@ -302,6 +337,7 @@ def read_asc(args, get_untagged=False):
                 src_segments[-1][-1].append(preprocess(segment['text']))
                 for feature_name, feature in features.items():
                     feature[-1][-1].append(segment[feature_name])
+        taxonomy.append(d['taxonomy'])
         src.append([preprocess_for_sos(raw_token) for raw_token in d['raw']])
         tgt.append([preprocess_for_sos(coda_token) for coda_token in d['coda']])
         assert len(src[-1]) == len(tgt[-1]) == len(src_segments[-1])
@@ -315,7 +351,8 @@ def read_asc(args, get_untagged=False):
                tgt=tgt,
                tgt_raw=tgt_raw,
                src_segments=src_segments,
-               features=features)
+               features=features,
+               taxonomy=taxonomy)
     return asc, data_
 
 def preprocess(sentence):

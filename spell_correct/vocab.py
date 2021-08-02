@@ -29,7 +29,7 @@ class VocabEntry(object):
     src or tgt language terms.
     """
 
-    def __init__(self, word2id=None):
+    def __init__(self, word2id=None, *args):
         """ Init VocabEntry Instance.
         @param word2id (dict): dictionary mapping words 2 indices
         """
@@ -43,6 +43,11 @@ class VocabEntry(object):
             self.word2id['<unk>'] = 3   # Unknown Token
         self.unk_id = self.word2id['<unk>']
         self.id2word = {v: k for k, v in self.word2id.items()}
+        if args:
+            x2y = args[0][0].split('2')
+            setattr(self, args[0][0], args[0][1])
+            setattr(self, x2y[1] + '2' + x2y[0],
+                    {v: k for k, v in getattr(self, args[0][0]).items()})
 
         ## Additions to the A4 code:
         # self.char_list = list("""ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789,;.!?:'\"/\\|_@#$%^&*~`+-=<>()[]""")
@@ -138,6 +143,24 @@ class VocabEntry(object):
         """
         return [[[self[pos] for pos in t] for t in s] for s in sents]
 
+    def taxonomy2indices(self, sents):
+        """ Convert list of sentences of words into list of list of indices.
+        @param sents (list[list[str]]): sentence(s) in words
+        @return word_ids (list[list[int]]): sentence(s) in indices
+        """
+        tag_vectors = []
+        for sent in sents:
+            tag_vectors.append([])
+            for token in sent:
+                tag_vector = [self.word2id['<n>']] * len(self.taxonomy2id)
+                if isinstance(token, list):
+                    for tag in token:
+                        if tag in self.taxonomy2id:
+                            tag_id = self.taxonomy2id[tag]
+                            tag_vector[tag_id] = self.word2id['<y>']
+                tag_vectors[-1].append(tag_vector)
+        return tag_vectors
+
     def words2indices(self, sents, add_beg_end=True):
         """ Convert list of sentences of words into list of list of indices.
         @param sents (list[list[str]]): sentence(s) in words
@@ -201,6 +224,23 @@ class VocabEntry(object):
         for i, pos in enumerate(pos_vocab, start=3):
             pos2id[pos] = i
         return pos2id
+
+    @staticmethod
+    def build_taxonomy_map(sents: List[List[List[str]]]):
+        taxonomy_tags = Counter()
+        for sent in sents:
+            for token in sent:
+                if isinstance(token, list):
+                    taxonomy_tags.update(token)
+        taxonomy2id = dict()
+        taxonomy2id['<pad>'] = 0
+        taxonomy2id['<n>'] = 1
+        taxonomy2id['<y>'] = 2
+        taxonomy2id['<unk>'] = 3
+        taxonomy_vocab = {}
+        for i, tag in enumerate(taxonomy_tags):
+            taxonomy_vocab[tag] = i
+        return taxonomy2id, ('taxonomy2id', taxonomy_vocab)
 
     @staticmethod
     def from_corpus(corpus, size, freq_cutoff=2):

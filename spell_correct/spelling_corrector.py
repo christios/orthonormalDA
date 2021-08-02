@@ -168,18 +168,12 @@ class SpellingCorrector(nn.Module):
             top1 = output.max(1)[1]
             output = (tgt_char_valid[t] if teacher_force else top1)
 
-        outputs = [outputs]
-        if return_attn:
-            outputs.append(attn_weights_batch)
-        if integrated_gradients:
-            outputs.append(gradients)
-            outputs.append(probs)
-        if return_valid_indexes:
-            outputs.append(tgt_indexes_valid)
-        if return_encoder_outputs:
-            outputs.append(encoder_outputs)
-        outputs = outputs[0] if len(outputs) == 1 else outputs
-
+        outputs = dict(decoder_outputs=outputs,
+                       attn=attn_weights_batch if return_attn else None,
+                       gradients=gradients if integrated_gradients else None,
+                       probs=probs if integrated_gradients else None,
+                       valid_indexes=tgt_indexes_valid if return_valid_indexes else None,
+                       encoder_outputs=encoder_outputs if return_encoder_outputs else None)
         return outputs
 
 
