@@ -175,9 +175,13 @@ def load_data(args, vocab, device):
     return train_iter, dev_iter
 
 def read_asc(path):
-    with open(path) as f:
-        data = json.load(f)
-
+    data = []
+    for file in os.listdir(path):
+        with open(os.path.join(path, file)) as f:
+            data += json.load(f)
+    # `c` counts the number of sentences discarded and `broke` is to monitor
+    # which sentences should be discarded due to malformation
+    c, broke = 0, False
     src, src_raw, tgt, tgt_raw = [], [], [], []
     for idx, d in enumerate(data):
         src.append([])
@@ -201,23 +205,50 @@ def read_asc(path):
                     assert token_raw[i] == token_morpho[i], 'Error'
                     segments.append('0')
                 else:
-                    raise 'Error'
+                    c += 1
+                    broke = True
+                    break
+            if broke:
+                break
             tgt[-1] += ''.join(segments).split()
+        if broke:
+            del src[-1]
+            del tgt[-1]
+            broke = False
 
         src_raw.append(preprocess(' '.join(d['raw'])))
         tgt_raw.append(' '.join(tgt[-1]))
+    # Remove malformed sentences by hand (there are very few)
+    indexes_to_remove = [279, 318]
+    src = [s for idx, s in enumerate(src) if idx not in indexes_to_remove]
+    tgt = [t for idx, t in enumerate(tgt) if idx not in indexes_to_remove]
+    src_raw = [s for idx, s in enumerate(src_raw) if idx not in indexes_to_remove]
+    tgt_raw = [t for idx, t in enumerate(tgt_raw) if idx not in indexes_to_remove]
     # Sanity check
     assert len(src) == len(tgt), 'Number of sentences is not equal.'
+    src_, tgt_, src_raw_, tgt_raw_ = [], [], [], []
+    c = len(src)
     for idx, (src_sent, tgt_sent) in enumerate(zip(src, tgt)):
-        assert len(src_sent) == len(
-            tgt_sent), 'Number of tokens in one of the sentences is not equal.'
+        if len(src_sent) != len(tgt_sent):
+            continue
+        well_formed = False
         for src_token, tgt_token in zip(src_sent, tgt_sent):
-            assert len(src_token) == len(
-                tgt_token), 'Mismatch between source and target.'
-            assert ' ' not in src_token, 'Space character in source token.'
-            assert tgt_token[-1] != '1', 'Wrong labeling'
-            assert len(tgt_token) == 1 and tgt_token[0] != '1' or len(tgt_token) != 1, 'Wrong labeling' 
-
+            if len(src_token) != len(tgt_token):
+                break
+            if ' ' in src_token:
+                break
+            if tgt_token[-1] == '1':
+                break
+            if not (len(tgt_token) == 1 and tgt_token[0] != '1' or len(tgt_token) != 1):
+                break
+            well_formed = True
+        if well_formed:
+            c -= 1
+            src_.append(src_sent)
+            tgt_.append(tgt_sent)
+            src_raw_.append(src_raw[idx])
+            tgt_raw_.append(tgt_raw[idx])
+    src, tgt, src_raw, tgt_raw = src_, tgt_, src_raw_, tgt_raw_
     tgt_raw = [' '.join(sent) for sent in tgt]
     return src, src_raw, tgt, tgt_raw
 

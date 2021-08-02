@@ -47,7 +47,7 @@ class VocabEntry(object):
         ## Additions to the A4 code:
         # self.char_list = list("""ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789,;.!?:'\"/\\|_@#$%^&*~`+-=<>()[]""")
         self.char_list = list(
-            """"0123456789#()+-.aeghilmnorst،؛؟ءآأؤإئابةتثجحخدذرزسشصضطظعغفقكلمنهوىيٱچڤݣ _""")
+            """"0123456789#()+-.aeghilmnorst،؛؟ءآأؤإئابةتثجحخدذرزسشصضطظعغفقكلمنهوىيٱچڤݣ _,:""")
         self.char2id = dict()  # Converts characters to integers
         self.char2id['<pad>'] = 2
         self.char2id['<w>'] = 0

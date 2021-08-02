@@ -230,7 +230,7 @@ class SegmentationTrainer:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--batch_size", default=16,
+    parser.add_argument("--batch_size", default=8,
                         type=int, help="Batch size.")
     parser.add_argument("--epochs", default=25, type=int,
                         help="Number of epochs.")
@@ -261,7 +261,7 @@ def main():
                         default="/local/ccayral/orthonormalDA1/data/coda-corpus/beirut_vocab.json", type=str,
                         help="Path to vocab JSON file.")
     parser.add_argument("--data",
-                        default="/local/ccayral/orthonormalDA1/data/asc/annotations_carine.json", type=str,
+                        default="/local/ccayral/orthonormalDA1/data/asc", type=str,
                         help="Path to file with src dataset.")
     parser.add_argument("--bert_cache_dir",
                         default="/local/ccayral/.transformer_models/MARBERT_pytorch_verison", type=str,
@@ -282,7 +282,7 @@ def main():
     args = parser.parse_args([] if "__file__" not in globals() else None)
 
     # args.load = '/local/ccayral/orthonormalDA1/model_weights/train-2021-05-25_18:18:40-bs=8,cd=128,ds=10000,e=23,gi=6,mdl=25,msl=35,rd=512,rdc=256,rl=2,s=42,usl=False,wd=256.pt'
-    # args.use_bert_enc = 'init'
+    args.use_bert_enc = 'init'
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
