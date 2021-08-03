@@ -138,7 +138,11 @@ def load_data(args, vocab, device):
         bert_tokenizer = BertTokenizerFast.from_pretrained(
             args.bert_model, cache_dir=args.bert_cache_dir)
     
-    src, src_raw, tgt, tgt_raw = read_asc(path=args.data)
+    if args.train_split:
+        src, src_raw, tgt, tgt_raw = read_asc(path=args.data)
+    else:
+        # src, src_raw, tgt, tgt_raw = read_coda_data(path=args.data)
+        src, src_raw, tgt, tgt_raw = read_madar_data(path=args.data)
 
     char_ids_src = vocab.src.words2charindices(src, add_beg_end=False)
     char_ids_tgt = [[[0 if c == '0' else 1 for c in w] for w in s] for s in tgt]
@@ -159,20 +163,55 @@ def load_data(args, vocab, device):
                         src_bert, src_bert_mask] if x]
     data = list(zip(*data))
 
-    lengths = [int(len(src_char)*args.train_split),
-                int(len(src_char)*(1-args.train_split))]
-    if sum(lengths) != len(src_char):
-        lengths[0] += len(src_char) - sum(lengths)
-    train_data, dev_data = random_split(data, lengths)
+    if args.train_split:
+        lengths = [int(len(src_char)*args.train_split),
+                    int(len(src_char)*(1-args.train_split))]
+        if sum(lengths) != len(src_char):
+            lengths[0] += len(src_char) - sum(lengths)
+        train_data, dev_data = random_split(data, lengths)
 
-    train_data = DialectData(args, train_data, vocab, device)
-    dev_data = DialectData(args, dev_data, vocab, device)
+        train_data = DialectData(args, train_data, vocab, device)
+        dev_data = DialectData(args, dev_data, vocab, device)
 
-    train_iter = DataLoader(train_data, batch_size=args.batch_size,
-                                shuffle=True, collate_fn=train_data.generate_batch)
-    dev_iter = DataLoader(dev_data, batch_size=len(dev_data),
-                            collate_fn=dev_data.generate_batch)
-    return train_iter, dev_iter
+        train_iter = DataLoader(train_data, batch_size=args.batch_size,
+                                    shuffle=True, collate_fn=train_data.generate_batch)
+        dev_iter = DataLoader(dev_data, batch_size=len(dev_data),
+                                collate_fn=dev_data.generate_batch)
+        return train_iter, dev_iter
+    else:
+        test_data = DialectData(args, data, vocab, device)
+        test_iter = DataLoader(test_data, batch_size=len(test_data),
+                               collate_fn=test_data.generate_batch)
+        return test_iter
+
+def read_madar_data(path):
+    with open(os.path.join(path, 'beirut_tgt.txt')) as f:
+        data = f.readlines()
+
+    src, src_raw, tgt, tgt_raw = [], [], [], []
+    for idx, d in enumerate(data):
+        src.append([preprocess(token) for token in d.strip().split()])
+        tgt.append(['0' * len(s) for s in src[-1]])
+        src_raw.append(d.strip())
+        tgt_raw.append(' '.join(tgt[-1]))
+    return src, src_raw, tgt, tgt_raw
+
+
+def read_coda_data(path):
+    data = []
+    for file in os.listdir(path):
+        with open(os.path.join(path, file)) as f:
+            data += json.load(f)
+
+    src, src_raw, tgt, tgt_raw = [], [], [], []
+    for idx, d in enumerate(data):
+        src.append([preprocess(t) for token_coda in d['coda']
+                   for t in token_coda.split()])
+        tgt.append(['0' * len(s) for s in src[-1]])
+        src_raw.append(preprocess(' '.join(d['raw'])))
+        tgt_raw.append(' '.join(tgt[-1]))
+    return src, src_raw, tgt, tgt_raw
+
 
 def read_asc(path):
     data = []
@@ -265,6 +304,7 @@ def preprocess(sentence):
     sentence = araby.strip_tashkeel(sentence)
     sentence = re.sub(r',', r'،', sentence)
     sentence = re.sub(r'\?', r'؟', sentence)
+    sentence = re.sub(r'ﺁ', r'آ', sentence)
     return sentence
 
 

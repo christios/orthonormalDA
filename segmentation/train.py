@@ -4,6 +4,7 @@ import re
 import os
 import datetime
 import json
+from collections import Counter
 
 import numpy as np
 import torch
@@ -25,10 +26,17 @@ class SegmentationTrainer:
             f'cuda:{args.gpu_index}' if torch.cuda.is_available() else 'cpu')
         self.vocab = Vocab.load(args.vocab_path)
 
-        self.train_iter, self.dev_iter =  load_data(args, self.vocab, self.device)
+        if args.train_split:
+            self.train_iter, self.dev_iter =  load_data(args, self.vocab, self.device)
+            bert_tokenizer = self.train_iter.dataset.bert_tokenizer
+        else:
+            self.test_iter = load_data(args, self.vocab, self.device)
+            bert_tokenizer = self.test_iter.dataset.bert_tokenizer
+        
+            
         self.model = Segmenter(args,
                                        vocab=self.vocab,
-                                       bert_tokenizer=self.train_iter.dataset.bert_tokenizer,
+                                       bert_tokenizer=bert_tokenizer,
                                        device=self.device).to(self.device)
 
         self.criterion = nn.CrossEntropyLoss(
@@ -149,37 +157,30 @@ class SegmentationTrainer:
         if data:
             iterator = process_raw_inputs(data)
         else:
-            iterator = self.dev_iter
+            iterator = self.test_iter
+        
         self.model.eval()
         with torch.no_grad():
-            for batch in iterator:
-                src = batch['src_char']
-                tgt = batch['tgt_char']
-                outputs, valid_indexes = self.model(
-                    batch, teacher_force=False, return_valid_indexes=True)
-                predictions = outputs.argmax(-1).permute(1, 0)
-                predictions = self.model._scatter(
-                    predictions, valid_indexes, tgt.shape)
+            batch = next(iter(self.test_iter))
+            output = self.model(
+                batch, use_crf=self.args.use_crf, decode=True)
+            
+            src = batch['src_char']
+            
+            src_perm = src.reshape(-1, self.args.max_word_len + 1)
+            src_valid = torch.any(
+                src_perm != self.vocab.tgt.char2id['<pad>'], dim=1)
+            src_perm = src_perm[src_valid]
 
-                matrices = [[], [], [], []]
-                for i, matrix in enumerate([src.permute(1, 0, 2), tgt.permute(1, 0, 2), predictions.permute(1, 0, 2)]):
-                    for sent in matrix:
-                        matrices[i].append([])
-                        for word in sent:
-                            if word[0].item() == self.vocab.src.char2id['<pad>']:
-                                break
-                            matrices[i][-1].append([])
-                            for char in word:
-                                if char.item() == self.vocab.src.char2id['</w>']:
-                                    break
-                                elif char.item() == self.vocab.src.char2id['<w>']:
-                                    continue
-                                matrices[i][-1][-1].append(
-                                    self.vocab.src.id2char[char.item()])
-                            matrices[i][-1][-1] = ''.join(matrices[i][-1][-1])
-                        if i == 0:
-                            matrices[3].append(' '.join(matrices[i][-1]))
-        return matrices
+            counter = Counter()
+            for i, o in enumerate(output['outputs']):
+                pred = ''.join([self.vocab.src.id2char[char_s] + ('+' if label else '')
+                    for char_s, label in zip(src_perm[i].tolist(), o)])
+                counter.update(pred.split('+'))
+            
+            pass
+
+
 
     def label_predictions(self, predictions, raw_inputs, raw_golds):
         train_corpus = [
@@ -205,9 +206,11 @@ class SegmentationTrainer:
         return mask_index
 
     @staticmethod
-    def load_model(model_path: str):
+    def load_model(model_path: str, data_path: str):
         params = torch.load(model_path)
         args = params['args']
+        args.train_split = 0
+        args.data = data_path
         network = SegmentationTrainer(args)
         network.model.load_state_dict(params['state_dict'])
         return network
@@ -230,7 +233,7 @@ class SegmentationTrainer:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--batch_size", default=8,
+    parser.add_argument("--batch_size", default=16,
                         type=int, help="Batch size.")
     parser.add_argument("--epochs", default=25, type=int,
                         help="Number of epochs.")
@@ -281,7 +284,7 @@ def main():
     parser.add_argument("--seed", default=42, type=int, help="Random seed.")
     args = parser.parse_args([] if "__file__" not in globals() else None)
 
-    # args.load = '/local/ccayral/orthonormalDA1/model_weights/train-2021-05-25_18:18:40-bs=8,cd=128,ds=10000,e=23,gi=6,mdl=25,msl=35,rd=512,rdc=256,rl=2,s=42,usl=False,wd=256.pt'
+    args.load = '/local/ccayral/orthonormalDA1/model_weights/train-2021-08-02_22:35:52-bs=16,cd=128,ds=10000,e=25,gi=6,msl=35,mwl=25,rdc=256,rl=2,s=42,uc=True.pt'
     args.use_bert_enc = 'init'
 
     torch.manual_seed(args.seed)
@@ -303,18 +306,12 @@ def main():
             json.dump(metrics, f)
         print(metrics)
     else:
-        trainer = SegmentationTrainer.load_model(args.load)
-        inputs, golds, predictions, sentences = trainer.predict()
-        labels = trainer.label_predictions(predictions, inputs, golds)
+        trainer = SegmentationTrainer.load_model(
+            args.load, data_path="/local/ccayral/orthonormalDA1/data/coda-corpus")
+        trainer.predict()
+
         with open(os.path.join(args.logs, args.logdir), 'w') as f:
-            for p, i, g, s, l in zip(predictions, inputs, golds, sentences, labels):
-                for p_word, i_word, g_word, r_word in zip(p, i, g, l):
-                    # print(r_word[2], file=f, end='\t')
-                    # print(i_word, file=f, end='\t')
-                    # print(g_word, file=f, end='\t')
-                    print(p_word, file=f, end='\t')
-                    # print(f"{r_word[0]}\t{r_word[1]}", file=f, end='\t')
-                    # print(s, file=f)
+            pass
 
 
 def error_analysis(args):
