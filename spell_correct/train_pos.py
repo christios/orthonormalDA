@@ -11,11 +11,12 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.tensorboard import SummaryWriter
-from sklearn.metrics import f1_score
+from sklearn.metrics import precision_score, recall_score, f1_score
 
 from spell_correct.vocab import Vocab
 from spell_correct.joint_learner import JointLearner
 from spell_correct.dialect_data import load_data, preprocess
+from spell_correct.models import TaxonomyTagger1
 
 class Trainer:
     def __init__(self, args, vocab) -> None:
@@ -25,7 +26,6 @@ class Trainer:
             f'cuda:{args.gpu_index}' if torch.cuda.is_available() else 'cpu')
         # self.device = torch.device('cpu')
         self.vocab = vocab
-
         self.train_iter, self.dev_iter, self.annotations = load_data(
             args, self.vocab, self.device, args.load)
         self.model = JointLearner(args,
@@ -75,13 +75,19 @@ class Trainer:
         tgt = tgt.reshape(-1)
         return self.criterion_char(outputs, tgt)
 
-    def _compute_accuracy_taxonomy(self, outputs, tgt):
-        outputs = torch.stack([tokens for tokens in outputs.values()]).permute(
-            1, 0, 2).argmax(-1)
-        outputs = outputs.reshape(-1).detach().cpu().numpy()
-        tgt = tgt.reshape(-1).detach().cpu().numpy()
-        f1score = f1_score(tgt, outputs, pos_label=self.vocab.taxonomy.word2id['<y>'])
-        return f1score
+    def _compute_metrics_taxonomy(self, outputs, tgt):
+        categories_metrics = {tag_id: dict() 
+            for tag_id in self.model.taxonomy_tagger.taxonomy_categories_layers}
+        outputs = {tag_id: tokens.argmax(-1).detach().cpu().numpy() for tag_id, tokens in outputs.items()}
+        tgt = {tag_id: labels.detach().cpu().numpy() for tag_id, labels in enumerate(tgt.permute(1, 0))}
+        for tag_id in range(len(tgt)):
+            categories_metrics[tag_id]['precision'] = precision_score(
+                tgt[tag_id], outputs[tag_id], pos_label=self.vocab.taxonomy.word2id['<y>'])
+            categories_metrics[tag_id]['recall'] = recall_score(
+                tgt[tag_id], outputs[tag_id], pos_label=self.vocab.taxonomy.word2id['<y>'])
+            categories_metrics[tag_id]['f1'] = f1_score(
+                tgt[tag_id], outputs[tag_id], pos_label=self.vocab.taxonomy.word2id['<y>'])
+        return categories_metrics
 
     def _compute_accuracy(self, outputs, features_labels):
         outputs = {f: torch.tensor(outputs[f], device=self.device)[
@@ -155,10 +161,10 @@ class Trainer:
                 loss = 0
                 # Tagger
                 output = self.model(batch, use_crf=self.args.use_crf)
-                if output['tagger'] is not None:
+                if output['tagger'] is not None and self.args.mode != 'taxonomy':
                     loss += output['tagger']['loss']
                 # Standardizer
-                if output['standardizer'] is not None:
+                if output['standardizer'] is not None and self.args.mode != 'taxonomy':
                     loss_standardizer = self._compute_loss_spell_correct(
                         output['standardizer'], batch['tgt_char'])
                     loss += loss_standardizer
@@ -170,9 +176,8 @@ class Trainer:
                     loss /= len(self.features)
                 elif self.args.mode == 'joint':
                     loss /= len(self.features) + 1
-                elif self.args.mode == 'standardizer_taxonomy':
-                    loss /= 2
                 loss.backward()
+                # torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.clip)
                 self.optimizer.step()
                 epoch_loss += loss.item()
                 if iteration and iteration % 50 == 0 and len(self.train_iter) - iteration > 10 \
@@ -203,12 +208,19 @@ class Trainer:
                     precision = metrics[f'dev_{f}_precision'][-1]
                     recall = metrics[f'dev_{f}_recall'][-1]
                     log_output += f"\t{m.ljust(25)}: {metrics[m][-1]:.1%}  {precision:.1%}  {recall:.1%}\n"
+                elif 'f1' in m and 'taxonomy' in m:
+                    tag_id = m[13:-3]
+                    tag = self.vocab.taxonomy.id2taxonomy[self.args.new_taxonomy]
+                    tag = tag[tag.index('-') + 2:]
+                    precision = metrics[f'dev_taxonomy_{tag_id}_precision'][-1]
+                    recall = metrics[f'dev_taxonomy_{tag_id}_recall'][-1]
+                    log_output += f"\t{tag[:23].ljust(25)}: {metrics[m][-1]:.1%}  {precision:.1%}  {recall:.1%}\n"
                 else:
                     log_output += f"\t{m.ljust(25)}: {metrics[m][-1]:.1%}\n"
             print(log_output)
             self.scheduler.step(metrics['dev_loss'][-1])
 
-        # self.save_model()
+        self.save_model()
         return metrics
 
     def evaluate(self):
@@ -216,7 +228,6 @@ class Trainer:
         grammatical_features = [f for f in self.features if f not in constant_features]
         self.model.eval()
         with torch.no_grad():
-            taxonomy_f1score = 0
             correct_total = [0, 0, 0, 0, 0]
             correct, total = {f: 0 for f in constant_features}, {
                 f: 0 for f in constant_features}
@@ -228,7 +239,7 @@ class Trainer:
                 output = self.model(
                     batch, use_crf=self.args.use_crf, decode=True, teacher_force=False)
                 # Standardizer
-                if output['standardizer'] is not None:
+                if output['standardizer'] is not None and self.args.mode != 'taxonomy':
                     loss += self._compute_loss_spell_correct(output['standardizer'],
                                            batch['tgt_char'])
                     correct_total_batch = self._compute_word_accuracy_word_level(
@@ -238,11 +249,11 @@ class Trainer:
                 if output['taxonomy'] is not None:
                     loss +=  self._compute_loss_taxonomy(
                         output['taxonomy'], batch['taxonomy'])
-                    taxonomy_f1score = self._compute_accuracy_taxonomy(
+                    taxonomy_metrics = self._compute_metrics_taxonomy(
                         output['taxonomy'], batch['taxonomy'])
                     
                 # Tagger
-                if output['tagger'] is not None:
+                if output['tagger'] is not None and self.args.mode != 'taxonomy':
                     if self.args.use_crf:
                         loss += output['tagger']['loss']
                         c, t = self._compute_accuracy(
@@ -273,15 +284,18 @@ class Trainer:
                 epoch_loss += loss.item()
 
         metrics = {}
-        if output['standardizer'] is not None:
+        if output['standardizer'] is not None and self.args.mode != 'taxonomy':
             metrics['dev_std_recall'] = (
                 correct_total[0] + correct_total[4]) / (correct_total[1] + correct_total[3])
             metrics['dev_std_precision'] = correct_total[2] / correct_total[3]
             metrics['dev_std_f1'] = 2 * (metrics['dev_std_recall'] * metrics['dev_std_precision']) / (
             metrics['dev_std_recall'] + metrics['dev_std_precision'])
         if output['taxonomy'] is not None:
-            metrics['dev_taxonomy_f1'] = taxonomy_f1score
-        if output['tagger'] is not None:
+            for tag_id, m in taxonomy_metrics.items():
+                metrics[f'dev_taxonomy_{tag_id}_precision'] = m['precision']
+                metrics[f'dev_taxonomy_{tag_id}_recall'] = m['recall']
+                metrics[f'dev_taxonomy_{tag_id}_f1'] = m['f1']
+        if output['tagger'] is not None and self.args.mode != 'taxonomy':
             for f in constant_features:
                 metrics[f'dev_{f}_accuracy'] = correct[f] / total[f]
             for f in grammatical_features:
@@ -329,11 +343,15 @@ class Trainer:
     def load_model(model_path: str):
         params = torch.load(model_path)
         args = params['args']
-        args.load = True
-        args.train_split = 0
+        # args.load = True
+        # args.train_split = 0
+        args.new_taxonomy = 13
         vocab = params['vocab']
         network = Trainer(args, vocab)
         network.model.load_state_dict(params['state_dict'])
+        # network.model.taxonomy_tagger = TaxonomyTagger1(input_dim=25,
+        #                                       vocab=network.vocab,
+        #                                       most_common=args.taxonomy_most_common).to(network.device)
         return network
 
     def save_model(self):
@@ -357,7 +375,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch_size", default=4,
                         type=int, help="Batch size.")
-    parser.add_argument("--epochs", default=50, type=int,
+    parser.add_argument("--epochs", default=25, type=int,
                         help="Number of epochs.")
     parser.add_argument("--ce_dim", default=128, type=int,
                         help="Word embedding dimension.")
@@ -372,6 +390,8 @@ def main():
     parser.add_argument("--train_split", default=0.9, type=float,
                         help="Proportion with which to split the train and dev data.")
     parser.add_argument("--lr", default=1e-3, type=float,
+                        help="Learning rate.")
+    parser.add_argument("--clip", default=0.5, type=float,
                         help="Learning rate.")
     parser.add_argument("--max_sent_len", default=35, type=int,
                         help="Maximum length of BERT input sequence.")
@@ -390,11 +410,13 @@ def main():
                         default='pos state number gender person voice mood aspect verbForm',
                         # default='pos',
                         help='Grammatical features that we are training for')
+    parser.add_argument("--taxonomy_most_common", default=1, type=int,
+                        help="Number of taxonomy tags to use (from most to least common).")
     parser.add_argument("--features_layer", default=64, type=int,
                         help="Features layer dimension.")
     parser.add_argument("--mode", default='tagger',
                         help="Training mode.",
-                        choices=['tagger', 'standardizer', 'standardizer_taxonomy', 'joint'])
+                        choices=['tagger', 'standardizer', 'standardizer_taxonomy', 'joint', 'taxonomy'])
     parser.add_argument("--gpu_index", default=6, type=int,
                         help="Index of GPU to be used.")
     parser.add_argument("--vocab", dest='vocab_path',
@@ -423,8 +445,8 @@ def main():
 
     # args.load = '/local/ccayral/orthonormalDA1/model_weights/train_pos-2021-07-27_21:19:57-bs=4,cd=128,ds=10000,e=12,gi=6,mdl=25,msps=60,msl=35,rd=512,rdc=256,rl=2,s=42,uc=True,ws=7.pt'
     # args.train_split = 0
-    # args.use_bert_enc = 'init'
-    # args.mode = 'standardizer_taxonomy'
+    args.use_bert_enc = 'init'
+    args.mode = 'taxonomy'
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -437,8 +459,16 @@ def main():
     )
     # error_analysis(args)
     if not args.load:
-        vocab = Vocab.load(args.vocab_path)
-        trainer = Trainer(args, vocab)
+        if args.mode != 'taxonomy':
+            vocab = Vocab.load(args.vocab_path)
+            trainer = Trainer(args, vocab)
+        else:
+            trainer = Trainer.load_model(
+                '/local/ccayral/orthonormalDA1/model_weights/train_pos-2021-08-03_18:16:07-bs=4,cd=128,ds=10000,e=15,fl=64,gi=6,mdl=25,msl=35,rd=512,rdc=256,rl=2,s=42,tmc=1,uc=True,ws=7.pt')
+            for param in trainer.model.standardizer.parameters():
+                param.requires_grad = False
+            for param in trainer.model.tagger.parameters():
+                param.requires_grad = False
         metrics = trainer.train()
         with open(os.path.join(args.config_save, args.logdir + '.json'), 'w') as f:
             json.dump(vars(args), f)

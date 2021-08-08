@@ -32,9 +32,11 @@ class JointLearner(nn.Module):
                                               bert_tokenizer=self.bert_tokenizer,
                                               device=self.device).to(self.device)
         self.taxonomy_tagger = TaxonomyTagger(input_dim=args.rnn_dim_char * 2,
-                                              vocab=self.vocab).to(self.device)
+                                              vocab=self.vocab,
+                                              most_common=args.taxonomy_most_common).to(self.device)
         self.grammatical_features_layer = nn.Linear(
             len(args.features.split()), args.features_layer)
+        self.args.mode = 'taxonomy'
 
     def forward(self,
                 batch: Dict[str, Union[Tensor,
@@ -49,9 +51,21 @@ class JointLearner(nn.Module):
             output_tagger = self.tagger(batch, use_crf=use_crf, output_loss=output_loss, decode=decode)
         elif self.args.mode == 'standardizer':
             output_standardizer = self.standardizer(batch, teacher_force=teacher_force)
-            output_standardizer = output_standardizer['outputs']
-        elif self.args.mode == 'standardizer_taxonomy':
-            output_standardizer = self.standardizer(batch,
+            output_standardizer = output_standardizer['decoder_outputs']
+        elif self.args.mode == 'taxonomy':
+            output_tagger = self.tagger(
+                batch, use_crf=use_crf, output_loss=False, decode=decode)
+            features_lstm_feats = output_tagger['features_lstm_feats']
+            features_argmax = {}
+            for name, feature in features_lstm_feats.items():
+                features_argmax[name] = torch.argmax(
+                    F.softmax(feature[self.args.window_size], dim=-1), dim=-1)
+                features_argmax[name] = torch.take(
+                    feature[self.args.window_size], features_argmax[name]).detach()
+
+            tagger_context = self._map_segment_to_token(features_argmax, batch['segments_per_token'])
+            tagger_context = self.grammatical_features_layer(tagger_context)
+            output_standardizer = self.standardizer(batch, tagger_context=tagger_context,
                 teacher_force=teacher_force, return_encoder_outputs=True, return_valid_indexes=True)
             encoder_outputs = output_standardizer['encoder_outputs']
             decoder_outputs = output_standardizer['decoder_outputs']
@@ -71,7 +85,7 @@ class JointLearner(nn.Module):
             tagger_context = self.grammatical_features_layer(tagger_context)
             output_standardizer = self.standardizer(
                 batch, tagger_context=tagger_context, teacher_force=teacher_force)
-            output_standardizer = output_standardizer['outputs']
+            output_standardizer = output_standardizer['decoder_outputs']
             
         output = dict(tagger=output_tagger,
                       standardizer=output_standardizer,

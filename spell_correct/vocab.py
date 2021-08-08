@@ -143,20 +143,22 @@ class VocabEntry(object):
         """
         return [[[self[pos] for pos in t] for t in s] for s in sents]
 
-    def taxonomy2indices(self, sents):
+    def taxonomy2indices(self, sents, most_common=None):
         """ Convert list of sentences of words into list of list of indices.
         @param sents (list[list[str]]): sentence(s) in words
         @return word_ids (list[list[int]]): sentence(s) in indices
         """
+        most_common = most_common if most_common is not None else len(self.taxonomy2id)
+        used_tags = {k: v for k, v in self.taxonomy2id.items() if v == most_common}
         tag_vectors = []
         for sent in sents:
             tag_vectors.append([])
             for token in sent:
-                tag_vector = [self.word2id['<n>']] * len(self.taxonomy2id)
+                tag_vector = [self.word2id['<n>']]
                 if isinstance(token, list):
                     for tag in token:
-                        if tag in self.taxonomy2id:
-                            tag_id = self.taxonomy2id[tag]
+                        if tag in used_tags:
+                            tag_id = 0 # used_tags[tag]
                             tag_vector[tag_id] = self.word2id['<y>']
                 tag_vectors[-1].append(tag_vector)
         return tag_vectors
@@ -238,8 +240,8 @@ class VocabEntry(object):
         taxonomy2id['<y>'] = 2
         taxonomy2id['<unk>'] = 3
         taxonomy_vocab = {}
-        for i, tag in enumerate(taxonomy_tags):
-            taxonomy_vocab[tag] = i
+        for i, tag in enumerate(taxonomy_tags.most_common()):
+            taxonomy_vocab[tag[0]] = i
         return taxonomy2id, ('taxonomy2id', taxonomy_vocab)
 
     @staticmethod

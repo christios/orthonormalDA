@@ -53,16 +53,16 @@ class DialectData(Dataset):
         i += 1
         assert len(self.src_raw) == len(self.tgt_raw) == len(self.src_char) == len(self.tgt_char)
         
-        if 'taxonomy' in args.mode:
-            self.taxonomy = [f[i] for f in data]
-            i += 1
-        
         if args.use_bert_enc:
             self.src_bert = [f[i] for f in data]
             i += 1
             self.src_bert_mask = [f[i] for f in data]
             i += 1
             assert len(self.src_raw) == len(self.src_bert) == len(self.src_bert_mask)
+        
+        if 'taxonomy' in args.mode or args.mode == 'joint':
+            self.taxonomy = [f[i] for f in data]
+            i += 1
 
         if args.mode in ['tagger', 'joint']:
             self.src_segments = [f[i] for f in data]
@@ -156,6 +156,7 @@ class DialectData(Dataset):
                 src_bert_mask_batch, dtype=torch.long).to(self.device)
 
         if taxonomy_batch:
+            # Do this processing because sentences from standardizer have batch_size and max_sent_len inverted
             taxonomy_batch_ = []
             column_indexes = [0] * len(taxonomy_batch)
             num_examples = sum(len(sent) for sent in taxonomy_batch)
@@ -231,16 +232,18 @@ def load_data(args, vocab, device, load=False):
         for feature_name, feature in asc['features'].items():
             feature_vocab = VocabEntry(VocabEntry.build_feature_vocab(feature))
             setattr(vocab, feature_name, feature_vocab)
-        taxonomy_map = VocabEntry(*VocabEntry.build_taxonomy_map(asc['taxonomy']))
-        vocab.taxonomy = taxonomy_map
+    taxonomy_map = VocabEntry(*VocabEntry.build_taxonomy_map(asc['taxonomy']))
+    vocab.taxonomy = taxonomy_map
         
     features_ids_labels = {}
     for feature_name, feature in asc['features'].items():
         features_ids_labels[feature_name] = getattr(vocab, feature_name).pos2indices(feature)
     
     taxonomy_labels = None
-    if 'taxonomy' in args.mode:
-        taxonomy_labels = vocab.taxonomy.taxonomy2indices(asc['taxonomy'])[:args.data_size]
+    if 'taxonomy' in args.mode or args.mode == 'joint':
+        most_common = getattr(args, 'new_taxonomy') if getattr(args, 'new_taxonomy') is not None else args.taxonomy_most_common
+        taxonomy_labels = vocab.taxonomy.taxonomy2indices(asc['taxonomy'], most_common=most_common)
+        taxonomy_labels = taxonomy_labels[:args.data_size]
 
     src_segments_char = char_ids_src_segments[:args.data_size]
     features_labels = {feature_name: feature[:args.data_size]
