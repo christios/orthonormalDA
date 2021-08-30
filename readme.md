@@ -1,6 +1,6 @@
 # Orthography Standardization Models
 
-This repository contains all of the models trained in the scope of my master's thesis which revolves around the standardization of orthography for Arabic dialects. This [pdf document](./thesis-modeling.pdf) contains Chapters 2 (Preliminary Modeling) and 5 (Joint Learning Using Multiple Features) of my thesis report in which all of the models and results are described in detail. Aleternatively, this [link](https://drive.google.com/file/d/1VA4PZ1UKKQmpJXi0JYkh8miuOsNMDk-U/view?usp=sharing) takes you to the full thesis report.
+This repository contains all of the models trained in the scope of my master's thesis which revolves around the standardization of orthography for Arabic dialects. This [pdf document](https://drive.google.com/file/d/1q3So1h3cUpOC76m6h4GWLpTrgxK9YyiP/view?usp=sharing) contains Chapters 2 (Preliminary Modeling) and 5 (Joint Learning Using Multiple Features) of my thesis report in which all of the models and results are described in detail. Aleternatively, this [link](https://drive.google.com/file/d/1VA4PZ1UKKQmpJXi0JYkh8miuOsNMDk-U/view?usp=sharing) takes you to the full thesis report.
 
 ## Disclaimer
 This repository has yet to be polished and is still in the same state in which it was left at submission time. It was not in any way made to be user-friendly, and was pushed for the time being for purely administrative reasons. It will soon be overhauled and released in a form which is more readily usable.
