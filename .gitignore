@@ -1,4 +1,6 @@
-data
+data/dialect-id
+data/gumar
+data/hybrid
 logs
 model_weights
 train_configs
